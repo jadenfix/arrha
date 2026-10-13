@@ -36,7 +36,7 @@ jobs:
           shared-key: settlement
           cache-on-failure: true
       - name: Check changed Rust formatting
-        run: rustfmt --edition 2021 --check crates/tools/indexer/src/{main,store}.rs crates/tools/cli/src/transfers.rs crates/sdk/rust/src/client.rs
+        run: rustfmt --edition 2021 --check crates/tools/indexer/src/{main,store}.rs crates/tools/cli/src/transfers.rs crates/sdk/rust/src/{client,transaction_builder}.rs
       - name: Persistent indexer and SDK tests
         run: cargo test --locked -p aether-indexer -p aether-sdk
       - name: Preserve storage errors at the RPC boundary

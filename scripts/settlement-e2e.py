@@ -68,7 +68,8 @@ def main():
             for field in ["tx_hash","block_hash","slot","status","gas_used"]:assert indexed[field]==onchain[field],field
             block=get(index_url+f'/block/{onchain["slot"]}');assert block["hash"]==onchain["block_hash"]
             assert onchain["tx_hash"] in block["tx_hashes"]
-            account=rpc(node_url,"aeth_getAccount",[recipient["address"],"latest"]);assert account["balance"]==1000,account
+            account=rpc(node_url,"aeth_getAccount",[recipient["address"],"latest"]);assert account and account["balance"]==1000,account
+            sender_account=rpc(node_url,"aeth_getAccount",[key["address"],"latest"]);assert sender_account["nonce"]==1 and sender_account["balance"]==100000000-1000-transfer["fee"],sender_account
             try:get(index_url+"/tx/0x"+"00"*32);raise AssertionError("unknown transaction falsely successful")
             except HTTPError as error:assert error.code==404
             cursor=get(index_url+"/status")["next_slot"]
@@ -78,6 +79,8 @@ def main():
             assert get(index_url+"/status")["next_slot"]>=cursor
             node=launch("aether-node");wait(lambda:rpc(node_url,"aeth_health",[]),30)
             assert rpc(node_url,"aeth_getTransactionReceipt",[tx_hash])==onchain
+            assert rpc(node_url,"aeth_getAccount",[recipient["address"],"latest"])==account
+            assert rpc(node_url,"aeth_getAccount",[key["address"],"latest"])==sender_account
             wait(lambda:get(index_url+"/status")["synchronization_error"] is None)
             report={"complete":True,"scope":"ephemeral devnet signed transfer/receipt/indexer durable restart","head":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),"tx_hash":tx_hash,"slot":onchain["slot"],"recipient_balance":account["balance"],"indexer_cursor_before_restart":cursor,"binary_sha256":binary_hashes,"fixture_providers":False,"funded_network":False}
             receipt_path.parent.mkdir(parents=True,exist_ok=True);receipt_path.write_text(json.dumps(report,indent=2)+"\n");print(json.dumps(report))

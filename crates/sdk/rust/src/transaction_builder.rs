@@ -1,10 +1,12 @@
 use std::collections::HashSet;
 
 use aether_crypto_primitives::Keypair;
-use aether_types::{Address, PublicKey, Signature, Transaction};
+use aether_types::{
+    Address, PublicKey, Signature, Transaction, TransferPayload, TRANSFER_PROGRAM_ID,
+};
 
 use crate::error::AetherSdkError;
-use crate::types::{ClientConfig, TransferRequest};
+use crate::types::ClientConfig;
 
 /// Builder for constructing token transfer transactions.
 pub struct TransferBuilder {
@@ -73,7 +75,13 @@ impl TransferBuilder {
             .amount
             .ok_or_else(|| AetherSdkError::build("missing amount"))?;
 
-        let payload = TransferRequest {
+        if amount == 0 {
+            return Err(AetherSdkError::build(
+                "transfer amount must be greater than zero",
+            ));
+        }
+
+        let payload = TransferPayload {
             recipient,
             amount,
             memo: self.memo,
@@ -85,6 +93,8 @@ impl TransferBuilder {
 
         let mut writes = HashSet::new();
         writes.insert(recipient);
+        writes.insert(sender_address);
+        let reads = HashSet::from([sender_address, recipient]);
 
         let mut tx = Transaction {
             nonce,
@@ -93,9 +103,9 @@ impl TransferBuilder {
             sender_pubkey,
             inputs: Vec::new(),
             outputs: Vec::new(),
-            reads: HashSet::new(),
+            reads,
             writes,
-            program_id: None,
+            program_id: Some(TRANSFER_PROGRAM_ID),
             data: payload_bytes,
             gas_limit: self.gas_limit,
             fee: self.fee,
@@ -117,5 +127,43 @@ impl TransferBuilder {
         tx.calculate_fee(&fee_params)
             .map_err(|e| AetherSdkError::InvalidFee(e.to_string()))?;
         Ok(tx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signed_transfer_uses_canonical_ledger_program_and_access_sets() {
+        let key = Keypair::generate();
+        let recipient = Address::from_slice(&[7u8; 20]).unwrap();
+        let tx = TransferBuilder::new(&ClientConfig::default())
+            .to(recipient)
+            .amount(1000)
+            .memo("actual transfer")
+            .chain_id(900)
+            .build(&key, 0)
+            .unwrap();
+        assert_eq!(tx.program_id, Some(TRANSFER_PROGRAM_ID));
+        let payload: TransferPayload = bincode::deserialize(&tx.data).unwrap();
+        assert_eq!(payload.recipient, recipient);
+        assert_eq!(payload.amount, 1000);
+        assert_eq!(payload.memo.as_deref(), Some("actual transfer"));
+        assert!(tx.reads.contains(&tx.sender) && tx.reads.contains(&recipient));
+        assert!(tx.writes.contains(&tx.sender) && tx.writes.contains(&recipient));
+        tx.verify_signature().unwrap();
+        assert_eq!(tx.chain_id, 900);
+    }
+
+    #[test]
+    fn zero_transfer_rejected_before_signing() {
+        let key = Keypair::generate();
+        let recipient = Address::from_slice(&[7u8; 20]).unwrap();
+        assert!(TransferBuilder::new(&ClientConfig::default())
+            .to(recipient)
+            .amount(0)
+            .build(&key, 0)
+            .is_err());
     }
 }

@@ -294,10 +294,10 @@ mod tests {
             assert!(store.get_block(0).unwrap().is_none());
             assert!(store.get_receipt(&receipt.tx_hash).unwrap().is_none());
             store
-                .commit_finalized_slot(0, Some(&block), &[receipt.clone()])
+                .commit_finalized_slot(0, Some(&block), std::slice::from_ref(&receipt))
                 .unwrap();
             assert!(store
-                .commit_finalized_slot(0, Some(&block), &[receipt.clone()])
+                .commit_finalized_slot(0, Some(&block), std::slice::from_ref(&receipt))
                 .is_err());
         }
         let store = PersistentStore::open(dir.path()).unwrap();

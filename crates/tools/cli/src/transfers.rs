@@ -88,7 +88,11 @@ pub async fn perform_transfer(
     let key_material = read_key_file(&key_path)?;
 
     let client = config.client();
-    let mut builder = client.transfer().to(params.recipient).amount(params.amount);
+    let mut builder = client
+        .transfer()
+        .chain_id(client.get_chain_id().await?)
+        .to(params.recipient)
+        .amount(params.amount);
     if let Some(memo) = &params.memo {
         builder = builder.memo(memo.clone());
     }

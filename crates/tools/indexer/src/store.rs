@@ -1,3 +1,4 @@
+use aether_sdk::types::RpcReceipt;
 use aether_types::{Block, H256};
 use anyhow::{Context, Result};
 use rocksdb::{ColumnFamilyDescriptor, Options, WriteBatch, DB};
@@ -7,6 +8,7 @@ use std::path::Path;
 const CF_BLOCKS: &str = "indexed_blocks";
 const CF_TX_INDEX: &str = "tx_to_slot";
 const CF_META: &str = "indexer_meta";
+const CF_RECEIPTS: &str = "indexed_receipts";
 
 /// Indexed block record stored in RocksDB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,12 +36,109 @@ impl PersistentStore {
             ColumnFamilyDescriptor::new(CF_BLOCKS, Options::default()),
             ColumnFamilyDescriptor::new(CF_TX_INDEX, Options::default()),
             ColumnFamilyDescriptor::new(CF_META, Options::default()),
+            ColumnFamilyDescriptor::new(CF_RECEIPTS, Options::default()),
         ];
 
         let db =
             DB::open_cf_descriptors(&opts, path, cfs).context("failed to open indexer database")?;
 
         Ok(PersistentStore { db })
+    }
+
+    /// Pin this database to the configured chain; never silently reuse another chain's cursor.
+    pub fn bind_chain(&self, chain_id: u64) -> Result<()> {
+        let cf = self.db.cf_handle(CF_META).context("missing meta CF")?;
+        let key = chain_id.to_be_bytes();
+        if let Some(existing) = self.db.get_cf(cf, b"chain_id")? {
+            anyhow::ensure!(
+                existing.as_slice() == key,
+                "indexer database belongs to another chain"
+            );
+        } else {
+            self.db.put_cf(cf, b"chain_id", key)?;
+        }
+        Ok(())
+    }
+
+    pub fn next_slot(&self) -> Result<u64> {
+        let cf = self.db.cf_handle(CF_META).context("missing meta CF")?;
+        self.db
+            .get_cf(cf, b"next_slot")?
+            .map(|bytes| {
+                let raw: [u8; 8] = bytes.as_slice().try_into().context("invalid cursor")?;
+                Ok(u64::from_be_bytes(raw))
+            })
+            .unwrap_or(Ok(0))
+    }
+
+    /// Commit the complete finalized slot and its receipts together with the cursor.
+    /// Missing receipts, mismatched hashes and out-of-order slots cannot advance it.
+    pub fn commit_finalized_slot(
+        &self,
+        slot: u64,
+        block: Option<&Block>,
+        receipts: &[RpcReceipt],
+    ) -> Result<()> {
+        anyhow::ensure!(slot == self.next_slot()?, "out-of-order finalized slot");
+        let mut batch = WriteBatch::default();
+        let meta = self.db.cf_handle(CF_META).context("missing meta CF")?;
+        if let Some(block) = block {
+            anyhow::ensure!(block.header.slot == slot, "block slot mismatch");
+            anyhow::ensure!(
+                receipts.len() == block.transactions.len(),
+                "incomplete receipts"
+            );
+            let hash = block.hash();
+            let tx_hashes: Vec<H256> = block.transactions.iter().map(|tx| tx.hash()).collect();
+            let indexed = IndexedBlock {
+                slot,
+                hash,
+                tx_count: tx_hashes.len(),
+                proposer: format!("{:?}", block.header.proposer),
+                timestamp: block.header.timestamp,
+                tx_hashes: tx_hashes.clone(),
+            };
+            let blocks_cf = self.db.cf_handle(CF_BLOCKS).context("missing blocks CF")?;
+            let tx_cf = self.db.cf_handle(CF_TX_INDEX).context("missing tx CF")?;
+            let receipts_cf = self
+                .db
+                .cf_handle(CF_RECEIPTS)
+                .context("missing receipts CF")?;
+            batch.put_cf(blocks_cf, slot.to_be_bytes(), bincode::serialize(&indexed)?);
+            for (expected, receipt) in tx_hashes.iter().zip(receipts) {
+                anyhow::ensure!(
+                    receipt.tx_hash == *expected
+                        && receipt.block_hash == hash
+                        && receipt.slot == slot,
+                    "receipt identity mismatch"
+                );
+                batch.put_cf(tx_cf, expected.as_bytes(), slot.to_be_bytes());
+                batch.put_cf(
+                    receipts_cf,
+                    expected.as_bytes(),
+                    serde_json::to_vec(receipt)?,
+                );
+            }
+            batch.put_cf(meta, b"latest_slot", slot.to_be_bytes());
+        } else {
+            anyhow::ensure!(receipts.is_empty(), "receipts without block");
+        }
+        let next = slot.checked_add(1).context("slot overflow")?;
+        batch.put_cf(meta, b"next_slot", next.to_be_bytes());
+        self.db.write(batch)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    pub fn get_receipt(&self, hash: &H256) -> Result<Option<RpcReceipt>> {
+        let cf = self
+            .db
+            .cf_handle(CF_RECEIPTS)
+            .context("missing receipts CF")?;
+        self.db
+            .get_cf(cf, hash.as_bytes())?
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(Into::into))
+            .transpose()
     }
 
     /// Ingest a block into the index.
@@ -168,6 +267,53 @@ mod tests {
             },
             txs,
         )
+    }
+
+    #[test]
+    fn finalized_commit_is_atomic_and_durable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let block = make_block(0, 1);
+        let receipt = RpcReceipt {
+            tx_hash: block.transactions[0].hash(),
+            block_hash: block.hash(),
+            slot: 0,
+            status: serde_json::json!("Success"),
+            gas_used: 21000,
+        };
+        {
+            let store = PersistentStore::open(dir.path()).unwrap();
+            store.bind_chain(900).unwrap();
+            assert!(store.bind_chain(1).is_err());
+            assert!(store.commit_finalized_slot(0, Some(&block), &[]).is_err());
+            let mut bad = receipt.clone();
+            bad.block_hash = H256::zero();
+            assert!(store
+                .commit_finalized_slot(0, Some(&block), &[bad])
+                .is_err());
+            assert_eq!(store.next_slot().unwrap(), 0);
+            assert!(store.get_block(0).unwrap().is_none());
+            assert!(store.get_receipt(&receipt.tx_hash).unwrap().is_none());
+            store
+                .commit_finalized_slot(0, Some(&block), &[receipt.clone()])
+                .unwrap();
+            assert!(store
+                .commit_finalized_slot(0, Some(&block), &[receipt.clone()])
+                .is_err());
+        }
+        let store = PersistentStore::open(dir.path()).unwrap();
+        assert_eq!(store.next_slot().unwrap(), 1);
+        assert_eq!(
+            store
+                .get_receipt(&receipt.tx_hash)
+                .unwrap()
+                .unwrap()
+                .block_hash,
+            block.hash()
+        );
+        assert_eq!(store.get_tx_slot(&receipt.tx_hash).unwrap(), Some(0));
+        store.commit_finalized_slot(1, None, &[]).unwrap();
+        assert_eq!(store.next_slot().unwrap(), 2);
+        assert_eq!(store.block_count().unwrap(), 1);
     }
 
     #[test]

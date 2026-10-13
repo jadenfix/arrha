@@ -222,6 +222,41 @@ impl AetherClient {
     // RPC query methods
     // ──────────────────────────────────────────────────────────────────────────
 
+    /// Decode the canonical node block, including its header and signed transactions.
+    pub async fn get_full_block_by_number(
+        &self,
+        slot: u64,
+    ) -> Result<Option<aether_types::Block>, AetherSdkError> {
+        let result = self
+            .rpc_call(
+                "aeth_getBlockByNumber",
+                &[Value::String(slot.to_string()), Value::Bool(true)],
+            )
+            .await?;
+        if result.is_null() {
+            return Ok(None);
+        }
+        serde_json::from_value(result).map(Some).map_err(|e| {
+            AetherSdkError::invalid_response(format!("failed to decode canonical block: {e}"))
+        })
+    }
+
+    pub async fn get_finalized_slot(&self) -> Result<u64, AetherSdkError> {
+        self.rpc_call("aeth_getFinalizedSlot", &[])
+            .await?
+            .as_u64()
+            .ok_or_else(|| AetherSdkError::invalid_response("expected finalized slot"))
+    }
+
+    pub async fn get_chain_id(&self) -> Result<u64, AetherSdkError> {
+        let value = self.rpc_call("aeth_chainId", &[]).await?;
+        let text = value
+            .as_str()
+            .ok_or_else(|| AetherSdkError::invalid_response("expected hexadecimal chain id"))?;
+        u64::from_str_radix(text.trim_start_matches("0x"), 16)
+            .map_err(|e| AetherSdkError::invalid_response(e.to_string()))
+    }
+
     /// Return the latest slot number (`aeth_getSlotNumber`).
     pub async fn get_block_number(&self) -> Result<u64, AetherSdkError> {
         let result: Value = self.rpc_call("aeth_getSlotNumber", &[]).await?;
@@ -364,11 +399,13 @@ impl AetherClient {
             )));
         }
 
-        let response: JsonRpcResponse<Value> = serde_json::from_str(rpc_body).map_err(|e| {
+        let response: Value = serde_json::from_str(rpc_body).map_err(|e| {
             AetherSdkError::invalid_response(format!("failed to decode rpc response: {e}"))
         })?;
 
-        if let Some(error) = response.error {
+        if let Some(error) = response.get("error").filter(|value| !value.is_null()) {
+            let error: JsonRpcError = serde_json::from_value(error.clone())
+                .map_err(|e| AetherSdkError::invalid_response(e.to_string()))?;
             return Err(AetherSdkError::Rpc {
                 code: error.code,
                 message: error.message,
@@ -376,7 +413,8 @@ impl AetherClient {
         }
 
         response
-            .result
+            .get("result")
+            .cloned()
             .ok_or_else(|| AetherSdkError::invalid_response("rpc response missing result field"))
     }
 }

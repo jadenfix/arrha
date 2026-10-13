@@ -1,0 +1,44 @@
+name: Settlement transaction and durable indexer
+on:
+  pull_request:
+    paths:
+      - 'crates/tools/indexer/**'
+      - 'crates/tools/cli/**'
+      - 'crates/sdk/rust/**'
+      - 'scripts/settlement-e2e.py'
+      - '.github/workflows/settlement-e2e.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  settlement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Native dependencies
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang cmake pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: settlement
+      - name: Check changed Rust formatting
+        run: rustfmt --edition 2021 --check crates/tools/indexer/src/{main,store}.rs crates/tools/cli/src/transfers.rs crates/sdk/rust/src/client.rs
+      - name: Persistent indexer and SDK tests
+        run: cargo test -p aether-indexer -p aether-sdk
+      - name: Build actual node, CLI and indexer
+        run: cargo build -p aether-node -p aether-cli -p aether-indexer --bin aether-node --bin aetherctl --bin aether-indexer
+      - name: Signed transaction to durable indexed receipt
+        run: python3 scripts/settlement-e2e.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: settlement-receipt
+          path: artifacts/settlement-e2e.json
+          if-no-files-found: ignore

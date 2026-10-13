@@ -82,12 +82,46 @@ impl Drop for MockRpcServer {
 }
 
 fn handle_rpc_connection(stream: &mut TcpStream) {
-    let mut req_buf = [0u8; 8192];
-    let bytes_read = stream.read(&mut req_buf).unwrap_or(0);
-    let request_text = String::from_utf8_lossy(&req_buf[..bytes_read]);
-    let tx_hash =
-        extract_tx_hash(&request_text).unwrap_or_else(|| format!("0x{}", "ab".repeat(32)));
-    let body = format!(r#"{{"jsonrpc":"2.0","result":"{}","id":1}}"#, tx_hash);
+    let mut request = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = stream.read(&mut buffer).unwrap_or(0);
+        if read == 0 {
+            return;
+        }
+        request.extend_from_slice(&buffer[..read]);
+        assert!(request.len() <= 65536, "fixture request exceeds limit");
+        if let Some(end) = request.windows(4).position(|v| v == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&request[..end]);
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    if key.eq_ignore_ascii_case("content-length") {
+                        value.trim().parse::<usize>().ok()
+                    } else {
+                        None
+                    }
+                })
+                .expect("fixture HTTP content length");
+            if request.len() >= end + 4 + length {
+                break;
+            }
+        }
+    }
+    let request_text = String::from_utf8_lossy(&request);
+    let payload: Value =
+        serde_json::from_str(request_text.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    let result = match payload["method"].as_str().unwrap() {
+        "aeth_chainId" => serde_json::json!("0x384"),
+        "aeth_health" => serde_json::json!({"status":"ok", "version":"fixture", "latestSlot":1,
+            "finalizedSlot":1, "peerCount":0, "sync":{"syncing":false}}),
+        "aeth_sendRawTransaction" => serde_json::json!(
+            extract_tx_hash(&request_text).expect("valid signed fixture transaction")
+        ),
+        method => panic!("unsupported fixture RPC method {method}"),
+    };
+    let body = serde_json::json!({"jsonrpc":"2.0","result":result,"id":payload["id"]}).to_string();
     let response = format!(
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
         body.len(),
@@ -102,6 +136,10 @@ fn extract_tx_hash(request_text: &str) -> Option<String> {
     let tx_hex = payload.get("params")?.get(0)?.as_str()?;
     let tx_bytes = hex::decode(tx_hex.trim_start_matches("0x")).ok()?;
     let tx: Transaction = bincode::deserialize(&tx_bytes).ok()?;
+    assert_eq!(tx.chain_id, 900);
+    assert_eq!(tx.program_id, Some(aether_types::TRANSFER_PROGRAM_ID));
+    tx.verify_signature()
+        .expect("fixture receives valid signature");
     Some(format!("{:?}", tx.hash()))
 }
 
@@ -132,6 +170,8 @@ fn transfer_and_job_flow() {
         .output()
         .unwrap();
     assert!(status.status.success());
+    let status_json: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status_json["node"]["status"], "ok");
 
     let recipient = format!("0x{}", "22".repeat(20));
     let transfer = Command::cargo_bin("aetherctl")

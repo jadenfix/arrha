@@ -18,13 +18,28 @@ pub struct Transaction {
     pub sender_pubkey: PublicKey,
     pub inputs: Vec<UtxoId>,
     pub outputs: Vec<UtxoOutput>,
+    #[serde(serialize_with = "serialize_address_set")]
     pub reads: HashSet<Address>,
+    #[serde(serialize_with = "serialize_address_set")]
     pub writes: HashSet<Address>,
     pub program_id: Option<H256>,
     pub data: Vec<u8>,
     pub gas_limit: u64,
     pub fee: u128,
     pub signature: Signature,
+}
+
+// Access sets are unordered in memory, but their wire encoding and signed hash
+// must be independent of insertion order and each process's randomized hasher.
+// A sorted sequence retains the existing bincode collection layout and ordinary
+// HashSet deserialization; legacy multi-address transaction hashes may change.
+fn serialize_address_set<S>(addresses: &HashSet<Address>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let mut ordered: Vec<&Address> = addresses.iter().collect();
+    ordered.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+    ordered.serialize(serializer)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -214,6 +229,53 @@ mod tests {
         let signature = keypair.sign(hash.as_bytes());
         tx.signature = TxSignature::from_bytes(signature);
         tx
+    }
+
+    #[test]
+    fn access_sets_have_canonical_wire_and_signed_hash() {
+        let keypair = Keypair::generate();
+        let addresses: Vec<Address> = (1..=8)
+            .map(|byte| Address::from_slice(&[byte; 20]).unwrap())
+            .collect();
+        let mut tx = signed_transaction(&keypair);
+        tx.reads = addresses.iter().copied().collect();
+        tx.writes = addresses.iter().rev().copied().collect();
+        tx.signature = Signature::from_bytes(keypair.sign(tx.hash().as_bytes()));
+        let expected_hash = tx.hash();
+        let expected_wire = bincode::serialize(&tx).unwrap();
+        for offset in 0..128 {
+            let mut reordered = tx.clone();
+            reordered.reads = (0..addresses.len())
+                .map(|i| addresses[(i + offset) % addresses.len()])
+                .collect();
+            reordered.writes = (0..addresses.len())
+                .rev()
+                .map(|i| addresses[(i + offset) % addresses.len()])
+                .collect();
+            assert_eq!(reordered.hash(), expected_hash);
+            assert_eq!(bincode::serialize(&reordered).unwrap(), expected_wire);
+            reordered.verify_signature().unwrap();
+        }
+    }
+
+    #[test]
+    fn access_set_roundtrips_preserve_signature_repeatedly() {
+        let keypair = Keypair::generate();
+        let mut tx = signed_transaction(&keypair);
+        let addresses: HashSet<Address> = (1..=8)
+            .map(|byte| Address::from_slice(&[byte; 20]).unwrap())
+            .collect();
+        tx.reads = addresses.clone();
+        tx.writes = addresses;
+        tx.signature = Signature::from_bytes(keypair.sign(tx.hash().as_bytes()));
+        let expected_hash = tx.hash();
+        let expected_wire = bincode::serialize(&tx).unwrap();
+        for _ in 0..256 {
+            tx = bincode::deserialize(&bincode::serialize(&tx).unwrap()).unwrap();
+            assert_eq!(tx.hash(), expected_hash);
+            assert_eq!(bincode::serialize(&tx).unwrap(), expected_wire);
+            tx.verify_signature().unwrap();
+        }
     }
 
     #[test]

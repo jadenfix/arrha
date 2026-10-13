@@ -17,6 +17,7 @@ warp = "0.3"
 hex = "0.4"
 
 aether-types = { path = "../../types" }
+aether-sdk = { path = "../../sdk/rust" }
 aether-rpc-grpc = { path = "../../rpc/grpc-firehose" }
 
 [dev-dependencies]

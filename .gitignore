@@ -66,3 +66,6 @@ venv/
 .claude/worktrees/
 .claude/settings.local.json
 com.*.claude-runner.plist
+
+# Bounded native workflow receipts are uploaded by CI, not source changes.
+/artifacts/

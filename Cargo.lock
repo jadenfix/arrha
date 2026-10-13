@@ -356,6 +356,7 @@ name = "aether-indexer"
 version = "0.1.0"
 dependencies = [
  "aether-rpc-grpc",
+ "aether-sdk",
  "aether-types",
  "anyhow",
  "bincode",

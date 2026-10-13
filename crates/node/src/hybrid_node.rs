@@ -134,6 +134,7 @@ pub fn create_hybrid_consensus(
     // Register the local validator's BLS key so its own votes are accepted
     if let Some(kp) = my_keypair {
         let addr = kp.address();
+        consensus.register_vrf_pubkey(addr, *kp.vrf.public_key());
         let bls_pk = kp.bls.public_key();
         let pop = kp.bls.proof_of_possession();
         if let Err(e) = consensus.register_bls_pubkey(addr, bls_pk, &pop) {
@@ -167,12 +168,19 @@ pub fn create_hybrid_consensus_with_vrf_keys(
 
     // Register all VRF public keys for cross-validation
     for (addr, vrf_pk) in vrf_pubkeys {
+        if let Some(kp) = my_keypair {
+            anyhow::ensure!(
+                addr != kp.address() || vrf_pk == *kp.vrf.public_key(),
+                "configured local VRF key differs from validator key"
+            );
+        }
         consensus.register_vrf_pubkey(addr, vrf_pk);
     }
 
     // Register the local validator's BLS key so votes are accepted
     if let Some(kp) = my_keypair {
         let addr = kp.address();
+        consensus.register_vrf_pubkey(addr, *kp.vrf.public_key());
         let bls_pk = kp.bls.public_key();
         let pop = kp.bls.proof_of_possession();
         if let Err(e) = consensus.register_bls_pubkey(addr, bls_pk, &pop) {
@@ -234,6 +242,42 @@ mod tests {
         let pubkey = keypair.public_key();
 
         assert_eq!(address, pubkey.to_address());
+    }
+
+    #[test]
+    fn local_vrf_key_verifies_own_proposal() {
+        use aether_consensus::ConsensusEngine;
+        use aether_types::{Block, VrfProof, H256};
+        let kp = ValidatorKeypair::generate();
+        let validators = vec![validator_info_from_keypair(&kp, 1000)];
+        for consensus in [
+            create_hybrid_consensus(validators.clone(), Some(&kp), 1.0, 100).unwrap(),
+            create_hybrid_consensus_with_vrf_keys(validators.clone(), vec![], Some(&kp), 1.0, 100)
+                .unwrap(),
+        ] {
+            let proof = consensus.get_leader_proof(0).expect("tau=1 own proposal");
+            let block = Block::new(
+                0,
+                H256::zero(),
+                kp.address(),
+                VrfProof {
+                    output: proof.output,
+                    proof: proof.proof,
+                },
+                vec![],
+            );
+            consensus
+                .validate_block(&block)
+                .expect("own VRF public key must verify");
+        }
+        assert!(create_hybrid_consensus_with_vrf_keys(
+            validators,
+            vec![(kp.address(), [0; 32])],
+            Some(&kp),
+            1.0,
+            100
+        )
+        .is_err());
     }
 
     #[test]

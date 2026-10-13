@@ -44,12 +44,12 @@ impl RpcBackend for NodeRpcBackend {
 
     fn get_block_by_number(&self, block_number: u64, _full_tx: bool) -> Result<Option<Block>> {
         let node = self.read_node()?;
-        Ok(node.get_block_by_slot(block_number))
+        node.try_get_block_by_slot(block_number)
     }
 
     fn get_block_by_hash(&self, block_hash: H256, _full_tx: bool) -> Result<Option<Block>> {
         let node = self.read_node()?;
-        Ok(node.get_block_by_hash(block_hash))
+        node.try_get_block_by_hash(block_hash)
     }
 
     fn get_transaction_receipt(&self, tx_hash: H256) -> Result<Option<TransactionReceipt>> {
@@ -416,15 +416,17 @@ async fn main() -> Result<()> {
 
     // Create RPC shutdown signal from the watch channel
     let rpc_shutdown_rx = shutdown_rx.clone();
-    let rpc_server = JsonRpcServer::new(backend, rpc_port).set_shutdown_signal(async move {
-        let mut rx = rpc_shutdown_rx;
-        // Wait until the value changes to true
-        while !*rx.borrow() {
-            if rx.changed().await.is_err() {
-                return;
-            }
-        }
-    });
+    let rpc_server =
+        JsonRpcServer::with_chain_id(backend, rpc_port, chain_config.chain.chain_id_numeric)
+            .set_shutdown_signal(async move {
+                let mut rx = rpc_shutdown_rx;
+                // Wait until the value changes to true
+                while !*rx.borrow() {
+                    if rx.changed().await.is_err() {
+                        return;
+                    }
+                }
+            });
 
     // Initialize P2P network
     let mut p2p = P2PNetwork::new_random()?;

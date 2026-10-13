@@ -1,0 +1,65 @@
+name: Settlement transaction and durable indexer
+on:
+  pull_request:
+    paths:
+      - 'crates/node/**'
+      - 'crates/types/**'
+      - 'crates/tools/indexer/**'
+      - 'crates/tools/cli/**'
+      - 'crates/sdk/rust/**'
+      - 'scripts/settlement-e2e.py'
+      - '.github/workflows/settlement-e2e.yml'
+  workflow_dispatch:
+concurrency:
+  group: settlement-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  settlement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Native dependencies
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang cmake pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: settlement
+          cache-on-failure: true
+      - name: Check changed Rust formatting
+        run: rustfmt --edition 2021 --check crates/types/src/transaction.rs crates/tools/indexer/src/{main,store}.rs crates/tools/cli/src/transfers.rs crates/sdk/rust/src/{client,transaction_builder}.rs
+      - name: Persistent indexer and SDK tests
+        run: cargo test --locked -p aether-types -p aether-indexer -p aether-sdk
+      - name: Preserve storage errors at the RPC boundary
+        run: |
+          cargo test --locked -p aether-node --lib rpc_block_reads_reject_corrupt_or_missing_indexed_data
+          cargo test --locked -p aether-node --lib local_vrf_key_verifies_own_proposal
+      - name: Build actual node, CLI and indexer
+        run: cargo build --locked -p aether-node -p aether-cli -p aether-indexer --bin aether-node --bin aetherctl --bin aether-indexer
+      - name: Signed transaction to durable indexed receipt
+        run: python3 scripts/settlement-e2e.py
+      - name: Execute settlement through the ecosystem controller
+        run: |
+          git clone --depth 1 --branch fix/settlement-execution-registration https://github.com/jadenfix/ecosystem.git "$RUNNER_TEMP/settlement-control"
+          test "$(git -C "$RUNNER_TEMP/settlement-control" rev-parse HEAD)" = "124595ae76f3c09a10b70780a7d10ee411a1fb7b"
+          mkdir -p "$RUNNER_TEMP/settlement-products"
+          ln -s "$GITHUB_WORKSPACE" "$RUNNER_TEMP/settlement-products/arrha"
+          ECOSYSTEM_REPOS_ROOT="$RUNNER_TEMP/settlement-products" python3 "$RUNNER_TEMP/settlement-control/scripts/run-ecosystem-e2e.py" --capability settlement_chain --receipt artifacts/settlement-controller.json --timeout 300
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: settlement-receipt
+          path: |
+            artifacts/settlement-e2e.json
+            artifacts/settlement-controller.json
+          if-no-files-found: ignore

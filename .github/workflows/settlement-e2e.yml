@@ -40,7 +40,9 @@ jobs:
       - name: Persistent indexer and SDK tests
         run: cargo test --locked -p aether-indexer -p aether-sdk
       - name: Preserve storage errors at the RPC boundary
-        run: cargo test --locked -p aether-node --lib rpc_block_reads_reject_corrupt_or_missing_indexed_data
+        run: |
+          cargo test --locked -p aether-node --lib rpc_block_reads_reject_corrupt_or_missing_indexed_data
+          cargo test --locked -p aether-node --lib local_vrf_key_verifies_own_proposal
       - name: Build actual node, CLI and indexer
         run: cargo build --locked -p aether-node -p aether-cli -p aether-indexer --bin aether-node --bin aetherctl --bin aether-indexer
       - name: Signed transaction to durable indexed receipt

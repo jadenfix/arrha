@@ -43,7 +43,7 @@ def main():
     processes=[]
     with tempfile.TemporaryDirectory(prefix="aether-settlement-") as temp:
         root=Path(temp);node_port,index_port,p2p,metrics=[port() for _ in range(4)];node_url=f"http://127.0.0.1:{node_port}";index_url=f"http://127.0.0.1:{index_port}"
-        env={**os.environ,"AETHER_NETWORK":"devnet","AETHER_NODE_DB_PATH":str(root/"node"),"AETHER_RPC_PORT":str(node_port),"AETHER_P2P_PORT":str(p2p),"AETHER_METRICS_PORT":str(metrics),"INDEXER_PORT":str(index_port),"INDEXER_DB_PATH":str(root/"index"),"INDEXER_RPC_URL":node_url}
+        env={**os.environ,"RUST_LOG":"info","AETHER_NETWORK":"devnet","AETHER_NODE_DB_PATH":str(root/"node"),"AETHER_RPC_PORT":str(node_port),"AETHER_P2P_PORT":str(p2p),"AETHER_METRICS_PORT":str(metrics),"INDEXER_PORT":str(index_port),"INDEXER_DB_PATH":str(root/"index"),"INDEXER_RPC_URL":node_url}
         for key in ["AETHER_BOOTSTRAP_PEERS","AETHER_GENESIS_PATH","AETHER_CONFIG_PATH","AETHER_VALIDATOR_KEY"]:env.pop(key,None)
         logs=[]
         def launch(name):
@@ -82,6 +82,11 @@ def main():
             report={"complete":True,"scope":"ephemeral devnet signed transfer/receipt/indexer durable restart","head":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),"tx_hash":tx_hash,"slot":onchain["slot"],"recipient_balance":account["balance"],"indexer_cursor_before_restart":cursor,"binary_sha256":binary_hashes,"fixture_providers":False,"funded_network":False}
             receipt_path.parent.mkdir(parents=True,exist_ok=True);receipt_path.write_text(json.dumps(report,indent=2)+"\n");print(json.dumps(report))
         except Exception:
+            for method, params in [("aeth_health",[]),("aeth_getBlockByNumber",["latest",True])]:
+                try: print(json.dumps({"diagnostic":method,"result":rpc(node_url,method,params)}),flush=True)
+                except Exception as error: print(f"diagnostic {method}: {error}",flush=True)
+            try: print(json.dumps({"indexer":get(index_url+"/status")}),flush=True)
+            except Exception as error: print(f"indexer diagnostic: {error}",flush=True)
             for log in logs:
                 log.flush();log.seek(0);print(log.read()[-5000:])
             raise

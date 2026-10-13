@@ -283,9 +283,7 @@ impl AetherClient {
         if result.is_null() {
             return Ok(None);
         }
-        serde_json::from_value(result)
-            .map(Some)
-            .map_err(|e| AetherSdkError::invalid_response(format!("failed to decode block: {e}")))
+        canonical_block_summary(result).map(Some)
     }
 
     /// Fetch a block by its slot number (`aeth_getBlockByNumber`).
@@ -307,9 +305,7 @@ impl AetherClient {
         if result.is_null() {
             return Ok(None);
         }
-        serde_json::from_value(result)
-            .map(Some)
-            .map_err(|e| AetherSdkError::invalid_response(format!("failed to decode block: {e}")))
+        canonical_block_summary(result).map(Some)
     }
 
     /// Fetch a transaction receipt by tx hash (`aeth_getTransactionReceipt`).
@@ -417,6 +413,26 @@ impl AetherClient {
             .cloned()
             .ok_or_else(|| AetherSdkError::invalid_response("rpc response missing result field"))
     }
+}
+
+fn canonical_block_summary(value: Value) -> Result<RpcBlock, AetherSdkError> {
+    let block: aether_types::Block = serde_json::from_value(value).map_err(|e| {
+        AetherSdkError::invalid_response(format!("failed to decode canonical block: {e}"))
+    })?;
+    let hash = block.hash();
+    let transactions = block
+        .transactions
+        .into_iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(AetherSdkError::serialization)?;
+    Ok(RpcBlock {
+        hash,
+        parent_hash: block.header.parent_hash,
+        slot: block.header.slot,
+        proposer: block.header.proposer,
+        transactions,
+    })
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

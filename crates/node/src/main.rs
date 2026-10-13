@@ -416,15 +416,17 @@ async fn main() -> Result<()> {
 
     // Create RPC shutdown signal from the watch channel
     let rpc_shutdown_rx = shutdown_rx.clone();
-    let rpc_server = JsonRpcServer::new(backend, rpc_port).set_shutdown_signal(async move {
-        let mut rx = rpc_shutdown_rx;
-        // Wait until the value changes to true
-        while !*rx.borrow() {
-            if rx.changed().await.is_err() {
-                return;
-            }
-        }
-    });
+    let rpc_server =
+        JsonRpcServer::with_chain_id(backend, rpc_port, chain_config.chain.chain_id_numeric)
+            .set_shutdown_signal(async move {
+                let mut rx = rpc_shutdown_rx;
+                // Wait until the value changes to true
+                while !*rx.borrow() {
+                    if rx.changed().await.is_err() {
+                        return;
+                    }
+                }
+            });
 
     // Initialize P2P network
     let mut p2p = P2PNetwork::new_random()?;

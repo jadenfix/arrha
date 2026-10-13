@@ -8,6 +8,8 @@ from urllib.request import Request, build_opener, ProxyHandler
 from urllib.error import HTTPError
 
 HTTP=build_opener(ProxyHandler({}))
+if not __debug__:
+    raise RuntimeError("Settlement verification requires assertions enabled; do not use python -O or PYTHONOPTIMIZE")
 def port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1",0));return sock.getsockname()[1]

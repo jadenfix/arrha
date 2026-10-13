@@ -2,7 +2,7 @@
 """Real ephemeral devnet: signed CLI transfer -> receipt -> persistent indexer.
 No mocks, hosted providers, external wallets or funded networks are used.
 """
-import argparse, json, os, signal, socket, subprocess, tempfile, time
+import argparse, hashlib, json, os, signal, socket, subprocess, tempfile, time
 from pathlib import Path
 from urllib.request import Request, build_opener, ProxyHandler
 from urllib.error import HTTPError
@@ -37,10 +37,12 @@ def main():
     binaries=Path(args.bin_dir).resolve();receipt_path=Path(args.receipt)
     for name in ["aether-node","aetherctl","aether-indexer"]:
         if not (binaries/name).is_file():raise RuntimeError(f"missing actual binary {name}")
+    binary_hashes={name:hashlib.sha256((binaries/name).read_bytes()).hexdigest() for name in ["aether-node","aetherctl","aether-indexer"]}
     processes=[]
     with tempfile.TemporaryDirectory(prefix="aether-settlement-") as temp:
         root=Path(temp);node_port,index_port,p2p,metrics=[port() for _ in range(4)];node_url=f"http://127.0.0.1:{node_port}";index_url=f"http://127.0.0.1:{index_port}"
         env={**os.environ,"AETHER_NETWORK":"devnet","AETHER_NODE_DB_PATH":str(root/"node"),"AETHER_RPC_PORT":str(node_port),"AETHER_P2P_PORT":str(p2p),"AETHER_METRICS_PORT":str(metrics),"INDEXER_PORT":str(index_port),"INDEXER_DB_PATH":str(root/"index"),"INDEXER_RPC_URL":node_url}
+        for key in ["AETHER_BOOTSTRAP_PEERS","AETHER_GENESIS_PATH","AETHER_CONFIG_PATH","AETHER_VALIDATOR_KEY"]:env.pop(key,None)
         logs=[]
         def launch(name):
             log=open(root/f"{name}-{len(logs)}.log","w+");logs.append(log)
@@ -75,7 +77,7 @@ def main():
             node=launch("aether-node");wait(lambda:rpc(node_url,"aeth_health",[]),30)
             assert rpc(node_url,"aeth_getTransactionReceipt",[tx_hash])==onchain
             wait(lambda:get(index_url+"/status")["synchronization_error"] is None)
-            report={"complete":True,"scope":"ephemeral devnet signed transfer/receipt/indexer durable restart","head":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),"tx_hash":tx_hash,"slot":onchain["slot"],"recipient_balance":account["balance"],"indexer_cursor_before_restart":cursor,"fixture_providers":False,"funded_network":False}
+            report={"complete":True,"scope":"ephemeral devnet signed transfer/receipt/indexer durable restart","head":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),"tx_hash":tx_hash,"slot":onchain["slot"],"recipient_balance":account["balance"],"indexer_cursor_before_restart":cursor,"binary_sha256":binary_hashes,"fixture_providers":False,"funded_network":False}
             receipt_path.parent.mkdir(parents=True,exist_ok=True);receipt_path.write_text(json.dumps(report,indent=2)+"\n");print(json.dumps(report))
         except Exception:
             for log in logs:

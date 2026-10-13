@@ -44,12 +44,12 @@ impl RpcBackend for NodeRpcBackend {
 
     fn get_block_by_number(&self, block_number: u64, _full_tx: bool) -> Result<Option<Block>> {
         let node = self.read_node()?;
-        Ok(node.get_block_by_slot(block_number))
+        node.try_get_block_by_slot(block_number)
     }
 
     fn get_block_by_hash(&self, block_hash: H256, _full_tx: bool) -> Result<Option<Block>> {
         let node = self.read_node()?;
-        Ok(node.get_block_by_hash(block_hash))
+        node.try_get_block_by_hash(block_hash)
     }
 
     fn get_transaction_receipt(&self, tx_hash: H256) -> Result<Option<TransactionReceipt>> {

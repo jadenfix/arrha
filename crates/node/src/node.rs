@@ -2005,6 +2005,48 @@ impl Node {
         self.get_block_by_hash(hash)
     }
 
+    /// RPC callers must distinguish empty slots from storage/index corruption.
+    pub fn try_get_block_by_slot(&self, slot: Slot) -> Result<Option<Block>> {
+        if let Some(block) = self
+            .blocks_by_slot
+            .get(&slot)
+            .and_then(|hash| self.blocks_by_hash.get(hash))
+        {
+            return Ok(Some(block.clone()));
+        }
+        let slot_key = format!("slot:{}", slot);
+        let Some(hash_bytes) = self
+            .ledger
+            .storage()
+            .get(CF_METADATA, slot_key.as_bytes())?
+        else {
+            return Ok(None);
+        };
+        let hash = H256::from_slice(&hash_bytes)
+            .map_err(|e| anyhow::anyhow!("invalid persisted slot hash: {e}"))?;
+        let block = self
+            .try_get_block_by_hash(hash)?
+            .context("persisted slot points to missing block")?;
+        anyhow::ensure!(
+            block.header.slot == slot,
+            "persisted slot points to another block slot"
+        );
+        Ok(Some(block))
+    }
+
+    pub fn try_get_block_by_hash(&self, hash: H256) -> Result<Option<Block>> {
+        if let Some(block) = self.blocks_by_hash.get(&hash) {
+            return Ok(Some(block.clone()));
+        }
+        let Some(bytes) = self.ledger.storage().get(CF_BLOCKS, hash.as_bytes())? else {
+            return Ok(None);
+        };
+        let block: Block =
+            bincode::deserialize(&bytes).context("persisted block cannot be decoded")?;
+        anyhow::ensure!(block.hash() == hash, "persisted block hash mismatch");
+        Ok(Some(block))
+    }
+
     pub fn get_block_by_hash(&self, hash: H256) -> Option<Block> {
         // Check in-memory cache first (recent blocks)
         if let Some(block) = self.blocks_by_hash.get(&hash) {
@@ -2126,6 +2168,37 @@ mod tests {
             commission: 0,
             active: true,
         }
+    }
+
+    #[test]
+    fn rpc_block_reads_reject_corrupt_or_missing_indexed_data() {
+        let dir = TempDir::new().unwrap();
+        let key = Keypair::generate();
+        let consensus = Box::new(SimpleConsensus::new(vec![validator_info_from_key(&key)]));
+        let node = Node::new(
+            dir.path(),
+            consensus,
+            Some(key),
+            None,
+            Arc::new(ChainConfig::devnet()),
+        )
+        .unwrap();
+        assert!(node.try_get_block_by_slot(42).unwrap().is_none());
+        let storage = node.ledger.storage();
+        storage
+            .put(CF_METADATA, b"slot:42", b"invalid hash")
+            .unwrap();
+        assert!(node.try_get_block_by_slot(42).is_err());
+        let hash = H256([1; 32]);
+        storage
+            .put(CF_METADATA, b"slot:42", hash.as_bytes())
+            .unwrap();
+        assert!(node.try_get_block_by_slot(42).is_err());
+        storage
+            .put(CF_BLOCKS, hash.as_bytes(), b"invalid block")
+            .unwrap();
+        assert!(node.try_get_block_by_hash(hash).is_err());
+        assert!(node.try_get_block_by_slot(42).is_err());
     }
 
     #[test]

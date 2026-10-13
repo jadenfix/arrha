@@ -3,6 +3,7 @@ on:
   pull_request:
     paths:
       - 'crates/node/**'
+      - 'crates/types/**'
       - 'crates/tools/indexer/**'
       - 'crates/tools/cli/**'
       - 'crates/sdk/rust/**'
@@ -36,9 +37,9 @@ jobs:
           shared-key: settlement
           cache-on-failure: true
       - name: Check changed Rust formatting
-        run: rustfmt --edition 2021 --check crates/tools/indexer/src/{main,store}.rs crates/tools/cli/src/transfers.rs crates/sdk/rust/src/{client,transaction_builder}.rs
+        run: rustfmt --edition 2021 --check crates/types/src/transaction.rs crates/tools/indexer/src/{main,store}.rs crates/tools/cli/src/transfers.rs crates/sdk/rust/src/{client,transaction_builder}.rs
       - name: Persistent indexer and SDK tests
-        run: cargo test --locked -p aether-indexer -p aether-sdk
+        run: cargo test --locked -p aether-types -p aether-indexer -p aether-sdk
       - name: Preserve storage errors at the RPC boundary
         run: |
           cargo test --locked -p aether-node --lib rpc_block_reads_reject_corrupt_or_missing_indexed_data

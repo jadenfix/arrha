@@ -568,6 +568,14 @@ mod tests {
         let decoded = hex::decode(encoded).unwrap();
         let decoded_tx: Transaction = bincode::deserialize(&decoded).unwrap();
         assert_eq!(decoded_tx.hash(), tx.hash());
+        decoded_tx.verify_signature().unwrap();
+        for _ in 0..256 {
+            let request = SubmitRpcRequest::new(tx.clone()).unwrap();
+            let wire = hex::decode(request.params[0].trim_start_matches("0x")).unwrap();
+            let decoded: Transaction = bincode::deserialize(&wire).unwrap();
+            assert_eq!(decoded.hash(), tx.hash());
+            decoded.verify_signature().unwrap();
+        }
     }
 
     #[tokio::test]

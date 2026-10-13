@@ -32,11 +32,11 @@ jobs:
       - name: Check changed Rust formatting
         run: rustfmt --edition 2021 --check crates/tools/indexer/src/{main,store}.rs crates/tools/cli/src/transfers.rs crates/sdk/rust/src/client.rs
       - name: Persistent indexer and SDK tests
-        run: cargo test -p aether-indexer -p aether-sdk
+        run: cargo test --locked -p aether-indexer -p aether-sdk
       - name: Preserve storage errors at the RPC boundary
-        run: cargo test -p aether-node --lib rpc_block_reads_reject_corrupt_or_missing_indexed_data
+        run: cargo test --locked -p aether-node --lib rpc_block_reads_reject_corrupt_or_missing_indexed_data
       - name: Build actual node, CLI and indexer
-        run: cargo build -p aether-node -p aether-cli -p aether-indexer --bin aether-node --bin aetherctl --bin aether-indexer
+        run: cargo build --locked -p aether-node -p aether-cli -p aether-indexer --bin aether-node --bin aetherctl --bin aether-indexer
       - name: Signed transaction to durable indexed receipt
         run: python3 scripts/settlement-e2e.py
       - name: Execute settlement through the ecosystem controller

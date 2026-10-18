@@ -2,7 +2,7 @@
 name = "aether-loadgen"
 version.workspace = true
 edition.workspace = true
-description = "Load generator for Aether devnet stress testing and performance benchmarking"
+description = "Load generator and finality/throughput benchmark for Aether devnets"
 categories = ["development-tools::testing"]
 keywords = ["aether", "loadgen", "benchmarks", "testing"]
 
@@ -13,9 +13,12 @@ serde.workspace = true
 serde_json.workspace = true
 bincode.workspace = true
 hex = "0.4"
+wat = "1"
 
 aether-types = { path = "../../types" }
 aether-crypto-primitives = { path = "../../crypto/primitives" }
+aether-crypto-bls = { path = "../../crypto/bls" }
+aether-sdk = { path = "../../sdk/rust" }
 
 [dev-dependencies]
 proptest = "1"

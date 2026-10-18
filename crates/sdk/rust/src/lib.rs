@@ -28,6 +28,7 @@
 
 pub mod agent_builder;
 pub mod agent_identity;
+pub mod chain;
 pub mod client;
 pub mod error;
 pub mod job_builder;

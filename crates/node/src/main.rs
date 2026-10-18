@@ -3,21 +3,119 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use aether_ledger::{ContractCall, ContractExecutor, ContractOutcome};
 use aether_metrics::exporter::start_metrics_exporter;
 use aether_node::SyncRequest;
 use aether_node::{
-    create_hybrid_consensus, create_hybrid_consensus_with_all_keys, validator_info_from_keypair,
-    GenesisConfig, Node, OutboundMessage, ValidatorKeypair,
+    create_hybrid_consensus, create_hybrid_consensus_with_all_keys, encode_tx_batch, unix_millis,
+    validator_info_from_keypair, GenesisConfig, Node, OutboundMessage, ValidatorKeypair,
 };
-use aether_p2p::network::{P2PNetwork, TOPIC_SYNC, TOPIC_VOTE};
+use aether_p2p::network::{P2PNetwork, TOPIC_SYNC, TOPIC_TX, TOPIC_VOTE};
 use aether_rpc_json::{JsonRpcServer, RpcBackend};
+use aether_runtime::{ExecutionContext, WasmVm};
 use aether_types::{Address, Block, ChainConfig, Transaction, TransactionReceipt, H256};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
 
+/// Maximum fuel (gas) a single contract call may use.
+const MAX_CONTRACT_GAS: u64 = 10_000_000;
+
+/// Contract runtime backed by the wasmtime VM in `aether-runtime`.
+struct WasmExecutor {
+    vm: std::sync::Mutex<WasmVm>,
+}
+
+impl ContractExecutor for WasmExecutor {
+    fn validate(&self, code: &[u8]) -> Result<()> {
+        self.vm
+            .lock()
+            .map_err(|_| anyhow::anyhow!("vm lock poisoned"))?
+            .validate_module(code)
+    }
+
+    fn execute(&self, call: ContractCall<'_>) -> Result<ContractOutcome> {
+        let ctx = ExecutionContext {
+            contract_address: call.contract,
+            caller: call.caller,
+            value: 0,
+            gas_limit: call.gas_limit.min(MAX_CONTRACT_GAS),
+            block_number: call.context.slot,
+            timestamp: call.context.timestamp,
+        };
+        let result = self
+            .vm
+            .lock()
+            .map_err(|_| anyhow::anyhow!("vm lock poisoned"))?
+            .execute_with_storage(call.code, &ctx, call.input, call.storage)?;
+        Ok(ContractOutcome {
+            success: result.success,
+            gas_used: result.gas_used,
+            storage: result.storage_changes,
+            logs: result.logs.into_iter().map(|l| l.data).collect(),
+            return_data: result.return_data,
+        })
+    }
+}
+
 struct NodeRpcBackend {
     node: Arc<RwLock<Node>>,
+    airdrop_enabled: bool,
+}
+
+fn hex0x(bytes: &[u8]) -> String {
+    format!("0x{}", hex::encode(bytes))
+}
+
+fn parse_h256(v: Option<&Value>) -> Result<H256> {
+    let s = v
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("expected 0x-prefixed hash"))?;
+    let bytes = hex::decode(s.trim_start_matches("0x"))?;
+    H256::from_slice(&bytes).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+fn parse_address(v: Option<&Value>) -> Result<Address> {
+    let s = v
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("expected 0x-prefixed address"))?;
+    let bytes = hex::decode(s.trim_start_matches("0x"))?;
+    Address::from_slice(&bytes).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Compact JSON summary of a block for explorers and benchmark tooling.
+fn block_summary(node: &Node, block: &Block, with_txs: bool) -> Value {
+    let hash = block.hash();
+    let times = node.block_times(&hash).unwrap_or_default();
+    let finalized = node.is_finalized(&hash, block.header.slot);
+    let qc = block.aggregated_vote.as_ref().map(|q| {
+        json!({
+            "slot": q.slot,
+            "blockHash": hex0x(q.block_hash.as_bytes()),
+            "signers": q.signers.iter().map(|p| hex0x(p.to_address().as_bytes())).collect::<Vec<_>>(),
+        })
+    });
+    let mut out = json!({
+        "slot": block.header.slot,
+        "hash": hex0x(hash.as_bytes()),
+        "parentHash": hex0x(block.header.parent_hash.as_bytes()),
+        "proposer": hex0x(block.header.proposer.as_bytes()),
+        "timestamp": block.header.timestamp,
+        "stateRoot": hex0x(block.header.state_root.as_bytes()),
+        "txCount": block.transactions.len(),
+        "parentQc": qc,
+        "finalized": finalized,
+        "seenAtMs": times.seen_ms,
+        "finalizedAtMs": times.finalized_ms,
+    });
+    if with_txs {
+        out["txHashes"] = json!(block
+            .transactions
+            .iter()
+            .map(|tx| hex0x(tx.hash().as_bytes()))
+            .collect::<Vec<_>>());
+    }
+    out
 }
 
 impl NodeRpcBackend {
@@ -103,14 +201,126 @@ impl RpcBackend for NodeRpcBackend {
     }
 
     fn allows_airdrop(&self) -> bool {
-        self.read_node()
-            .map(|node| node.allows_airdrop())
-            .unwrap_or(false)
+        // Seeding balances outside of blocks only works with one validator;
+        // in a multi-validator network it would fork the state.
+        self.airdrop_enabled
+            && self
+                .read_node()
+                .map(|node| node.allows_airdrop())
+                .unwrap_or(false)
     }
 
     fn request_airdrop(&self, address: Address, amount: u128) -> Result<()> {
         let mut node = self.write_node()?;
         node.seed_account(&address, amount)
+    }
+
+    fn extension(&self, method: &str, params: &[Value]) -> Option<Result<Value>> {
+        let result = match method {
+            // Submit many bincode transactions (hex strings) in one request.
+            "aeth_sendRawTransactions" => (|| {
+                let list = params
+                    .first()
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| anyhow::anyhow!("expected an array of hex transactions"))?;
+                let mut txs = Vec::with_capacity(list.len());
+                let mut results = vec![Value::Null; list.len()];
+                let mut index = Vec::with_capacity(list.len());
+                for (i, item) in list.iter().enumerate() {
+                    let decoded = item
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("not a string"))
+                        .and_then(|s| Ok(hex::decode(s.trim_start_matches("0x"))?))
+                        .and_then(|b| Ok(bincode::deserialize::<Transaction>(&b)?));
+                    match decoded {
+                        Ok(tx) => {
+                            txs.push(tx);
+                            index.push(i);
+                        }
+                        Err(e) => results[i] = json!({ "error": e.to_string() }),
+                    }
+                }
+                let mut node = self.write_node()?;
+                for (i, r) in index.into_iter().zip(node.submit_transactions(txs)) {
+                    results[i] = match r {
+                        Ok(h) => json!(hex0x(h.as_bytes())),
+                        Err(e) => json!({ "error": e.to_string() }),
+                    };
+                }
+                Ok(json!(results))
+            })(),
+            // Block summaries for a slot range (finalized + pending head chain).
+            "aeth_getBlockSummaries" => (|| {
+                let from = params.first().and_then(|v| v.as_u64()).unwrap_or(0);
+                let to = params.get(1).and_then(|v| v.as_u64()).unwrap_or(from);
+                let with_txs = params.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
+                if to < from || to - from > 1000 {
+                    anyhow::bail!("range must be 0..=1000 slots");
+                }
+                let node = self.read_node()?;
+                let out: Vec<Value> = (from..=to)
+                    .filter_map(|slot| node.get_block_by_slot(slot))
+                    .map(|b| block_summary(&node, &b, with_txs))
+                    .collect();
+                Ok(json!(out))
+            })(),
+            "aeth_getTransactionStatus" => (|| {
+                let hash = parse_h256(params.first())?;
+                let node = self.read_node()?;
+                Ok(match node.get_transaction_receipt(hash) {
+                    None => json!({ "status": "unknown" }),
+                    Some(r) => {
+                        let finalized = node.is_finalized(&r.block_hash, r.slot);
+                        let ok = matches!(r.status, aether_types::TransactionStatus::Success);
+                        json!({
+                            "status": if finalized { "finalized" } else { "included" },
+                            "slot": r.slot,
+                            "blockHash": hex0x(r.block_hash.as_bytes()),
+                            "success": ok,
+                            "error": match &r.status {
+                                aether_types::TransactionStatus::Failed { reason } => json!(reason),
+                                _ => Value::Null,
+                            },
+                            "gasUsed": r.gas_used,
+                            "logs": r.logs.iter().map(|l| hex0x(&l.data)).collect::<Vec<_>>(),
+                        })
+                    }
+                })
+            })(),
+            "aeth_getContractStorage" => (|| {
+                let address = parse_address(params.first())?;
+                let pending = params.get(1).and_then(|v| v.as_str()) == Some("pending");
+                let node = self.read_node()?;
+                let storage = node.get_contract_storage(address, pending)?;
+                let map: serde_json::Map<String, Value> = storage
+                    .iter()
+                    .map(|(k, v)| (hex0x(k), json!(hex0x(v))))
+                    .collect();
+                Ok(Value::Object(map))
+            })(),
+            "aeth_getPendingAccount" => (|| {
+                let address = parse_address(params.first())?;
+                let node = self.read_node()?;
+                Ok(serde_json::to_value(node.get_account_pending(address)?)?)
+            })(),
+            "aeth_getNodeInfo" => (|| {
+                let node = self.read_node()?;
+                let (tip, tip_slot) = node.finalized_tip();
+                Ok(json!({
+                    "validator": node.validator_address().map(|a| hex0x(a.as_bytes())),
+                    "currentSlot": node.current_slot(),
+                    "finalizedSlot": tip_slot,
+                    "finalizedHash": hex0x(tip.as_bytes()),
+                    "latestBlockSlot": node.latest_block_slot(),
+                    "pendingBlocks": node.pending_block_count(),
+                    "mempool": node.mempool_size(),
+                    "peers": node.peer_count(),
+                    "orphans": node.orphan_count(),
+                }))
+            })(),
+            _ => return None,
+        };
+        Some(result)
     }
 }
 
@@ -123,60 +333,58 @@ const MAX_EVENTS_PER_TICK: usize = 256;
 async fn run_slot_loop(
     node: Arc<RwLock<Node>>,
     mut net_rx: mpsc::Receiver<aether_p2p::network::NetworkEvent>,
-    slot_ms: u64,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
-    let mut inbound_drops: u64 = 0;
-
+    // Network events are handled as they arrive (votes and blocks must not
+    // wait for the next slot), slots fire on wall-clock boundaries, and
+    // locally submitted transactions are gossiped in batches every 20 ms.
+    let mut gossip_tick = tokio::time::interval(Duration::from_millis(20));
+    gossip_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        // Check for shutdown signal before each tick
         if *shutdown_rx.borrow() {
             tracing::info!("Slot loop received shutdown signal, stopping");
             return Ok(());
         }
-
-        // Drain pending network messages, bounded per tick to prevent lock
-        // starvation. If the channel is flooded, remaining events are
-        // deferred to the next tick so slot production stays on schedule.
-        {
-            let mut guard = node
-                .write()
+        let now = unix_millis();
+        let wait_ms = {
+            let guard = node
+                .read()
                 .map_err(|_| anyhow::anyhow!("node lock poisoned"))?;
-            let mut processed = 0usize;
-            while processed < MAX_EVENTS_PER_TICK {
-                match net_rx.try_recv() {
-                    Ok(event) => {
-                        guard.handle_network_event(event)?;
-                        processed += 1;
+            let slot = guard.wallclock_slot(now).unwrap_or(0);
+            let next = guard.slot_start_ms(slot + 1).unwrap_or(now + 500);
+            next.saturating_sub(now).max(1)
+        };
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(wait_ms)) => {
+                let mut guard = node
+                    .write()
+                    .map_err(|_| anyhow::anyhow!("node lock poisoned"))?;
+                guard.tick_wallclock(unix_millis())?;
+            }
+            event = net_rx.recv() => {
+                let Some(event) = event else { return Ok(()) };
+                let mut guard = node
+                    .write()
+                    .map_err(|_| anyhow::anyhow!("node lock poisoned"))?;
+                guard.handle_network_event(event)?;
+                // Drain whatever else is queued, bounded so slots stay on time.
+                let mut processed = 1usize;
+                while processed < MAX_EVENTS_PER_TICK {
+                    match net_rx.try_recv() {
+                        Ok(event) => {
+                            guard.handle_network_event(event)?;
+                            processed += 1;
+                        }
+                        Err(_) => break,
                     }
-                    Err(_) => break,
                 }
             }
-            if processed == MAX_EVENTS_PER_TICK {
-                // We hit the per-tick cap. Remaining events stay in the
-                // bounded channel and will be processed on the next tick.
-                // If the channel is persistently full, the P2P layer's
-                // try_send will start dropping new events at the source.
-                inbound_drops += 1;
-                tracing::warn!(
-                    processed,
-                    backpressure_ticks = inbound_drops,
-                    "Inbound event drain capped — deferring remaining events to next tick"
-                );
+            _ = gossip_tick.tick() => {
+                let mut guard = node
+                    .write()
+                    .map_err(|_| anyhow::anyhow!("node lock poisoned"))?;
+                guard.flush_tx_gossip();
             }
-        }
-
-        // Tick the node
-        {
-            let mut guard = node
-                .write()
-                .map_err(|_| anyhow::anyhow!("node lock poisoned"))?;
-            guard.tick()?;
-        }
-
-        // Sleep with shutdown awareness — wake early if shutdown is signaled
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(slot_ms)) => {}
             _ = shutdown_rx.changed() => {
                 tracing::info!("Slot loop received shutdown signal, stopping");
                 return Ok(());
@@ -234,8 +442,23 @@ async fn run_p2p_outbound(
                         }
                     }
                     Some(OutboundMessage::BroadcastTransaction(tx)) => {
-                        if let Err(e) = p2p.broadcast_transaction(&tx) {
-                            tracing::warn!("failed to broadcast tx: {e}");
+                        match encode_tx_batch(std::slice::from_ref(&tx)) {
+                            Ok(data) => {
+                                if let Err(e) = p2p.publish(TOPIC_TX, data) {
+                                    tracing::warn!("failed to broadcast tx: {e}");
+                                }
+                            }
+                            Err(e) => tracing::error!("failed to serialize tx: {e}"),
+                        }
+                    }
+                    Some(OutboundMessage::BroadcastTransactions(txs)) => {
+                        match encode_tx_batch(&txs) {
+                            Ok(data) => {
+                                if let Err(e) = p2p.publish(TOPIC_TX, data) {
+                                    tracing::warn!(count = txs.len(), "failed to broadcast tx batch: {e}");
+                                }
+                            }
+                            Err(e) => tracing::error!("failed to serialize tx batch: {e}"),
                         }
                     }
                     Some(OutboundMessage::RequestBlockRange { from_slot, to_slot }) => {
@@ -326,6 +549,7 @@ async fn main() -> Result<()> {
     let validator_address = validator_keypair.address();
 
     // Build consensus from genesis file (multi-validator) or single-validator mode
+    let mut genesis_file: Option<GenesisConfig> = None;
     let consensus: Box<dyn aether_consensus::ConsensusEngine> =
         if let Ok(genesis_path) = env::var("AETHER_GENESIS_PATH") {
             tracing::info!(path = %genesis_path, "Loading genesis config");
@@ -345,14 +569,16 @@ async fn main() -> Result<()> {
                 "Genesis config loaded"
             );
 
-            Box::new(create_hybrid_consensus_with_all_keys(
+            let engine = create_hybrid_consensus_with_all_keys(
                 result.validator_set,
                 vrf_pubkeys,
                 bls_pubkeys,
                 Some(&validator_keypair),
                 chain_config.consensus.tau,
                 chain_config.chain.epoch_slots,
-            )?)
+            )?;
+            genesis_file = Some(genesis);
+            Box::new(engine)
         } else {
             // Single-validator quick-start mode
             let validators = vec![validator_info_from_keypair(&validator_keypair, 1_000_000)];
@@ -384,15 +610,43 @@ async fn main() -> Result<()> {
         Some(validator_keypair.bls),
         chain_config.clone(),
     )?;
-
-    // Seed validator with genesis balance (only on first run)
-    let genesis_balance = chain_config.tokens.swr_initial_supply;
-    if node.get_account(validator_address)?.is_none() {
-        node.seed_account(&validator_address, genesis_balance)?;
-        tracing::info!("Genesis: funded validator with {genesis_balance}");
-    } else {
-        tracing::info!("Node already initialized, skipping genesis funding");
+    node.set_contract_executor(Arc::new(WasmExecutor {
+        vm: std::sync::Mutex::new(WasmVm::new(MAX_CONTRACT_GAS)?),
+    }));
+    if let Ok(path) = env::var("AETHER_EVENT_LOG") {
+        node.set_event_log(Path::new(&path))?;
+        tracing::info!(path, "Writing consensus event log");
     }
+
+    // Genesis state: every validator seeds the SAME balances from the shared
+    // genesis file (previously each node funded only itself, so state roots
+    // diverged and peers rejected each other's blocks). Single-validator
+    // quick-start mode funds just the local validator.
+    let multi_validator = genesis_file
+        .as_ref()
+        .is_some_and(|g| g.validators.len() > 1);
+    let (genesis_accounts, genesis_time_ms): (Vec<(Address, u128)>, u64) = match &genesis_file {
+        Some(g) => (
+            g.accounts.iter().map(|a| (a.address, a.balance)).collect(),
+            g.genesis_time_ms()
+                .or_else(|| node.stored_genesis_time_ms())
+                .unwrap_or_else(unix_millis),
+        ),
+        None => (
+            vec![(validator_address, chain_config.tokens.swr_initial_supply)],
+            node.stored_genesis_time_ms().unwrap_or_else(unix_millis),
+        ),
+    };
+    if node.apply_genesis(&genesis_accounts, genesis_time_ms)? {
+        tracing::info!(
+            accounts = genesis_accounts.len(),
+            genesis_time_ms,
+            "Genesis state applied"
+        );
+    } else {
+        tracing::info!("Node already initialized, skipping genesis");
+    }
+    node.set_genesis_time_ms(genesis_time_ms);
 
     // Set up P2P outbound channel with bounded capacity for backpressure.
     // If the P2P layer can't keep up, senders will drop messages rather than OOMing.
@@ -412,19 +666,27 @@ async fn main() -> Result<()> {
 
     let backend = NodeRpcBackend {
         node: shared_node.clone(),
+        airdrop_enabled: !multi_validator,
     };
 
     // Create RPC shutdown signal from the watch channel
     let rpc_shutdown_rx = shutdown_rx.clone();
-    let rpc_server = JsonRpcServer::new(backend, rpc_port).set_shutdown_signal(async move {
-        let mut rx = rpc_shutdown_rx;
-        // Wait until the value changes to true
-        while !*rx.borrow() {
-            if rx.changed().await.is_err() {
-                return;
-            }
-        }
-    });
+    let rpc_per_sec: f64 = env::var("AETHER_RPC_RATE_LIMIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50.0);
+    let rpc_server =
+        JsonRpcServer::with_chain_id(backend, rpc_port, chain_config.chain.chain_id_numeric)
+            .with_rate_limit((rpc_per_sec * 2.0) as u32, rpc_per_sec)
+            .set_shutdown_signal(async move {
+                let mut rx = rpc_shutdown_rx;
+                // Wait until the value changes to true
+                while !*rx.borrow() {
+                    if rx.changed().await.is_err() {
+                        return;
+                    }
+                }
+            });
 
     // Initialize P2P network
     let mut p2p = P2PNetwork::new_random()?;
@@ -457,11 +719,9 @@ async fn main() -> Result<()> {
         }
     }
 
-    let slot_ms = chain_config.chain.slot_ms;
     let slot_task = tokio::spawn(run_slot_loop(
         shared_node.clone(),
         net_rx,
-        slot_ms,
         shutdown_rx.clone(),
     ));
     let rpc_task = tokio::spawn(async move { rpc_server.run().await });
@@ -506,9 +766,9 @@ async fn main() -> Result<()> {
     // Signal all tasks to stop
     let _ = shutdown_tx.send(true);
 
-    // Give tasks a bounded window to finish in-flight work
-    tracing::info!("Waiting for tasks to finish (5s deadline)...");
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Give tasks a short window to finish in-flight work
+    tracing::info!("Waiting for tasks to finish...");
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Flush node state to disk
     match shared_node.write() {

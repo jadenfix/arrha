@@ -38,6 +38,7 @@ pub use primitives::{Address, Epoch, PublicKey, Signature, Slot, H160, H256};
 mod proptest_tests;
 
 pub use transaction::{
-    BlobTransaction, Transaction, TransactionReceipt, TransactionStatus, TransferPayload, UtxoId,
-    UtxoOutput, BLOB_RETENTION_SLOTS, MAX_BLOBS_PER_TX, MAX_BLOB_SIZE, TRANSFER_PROGRAM_ID,
+    contract_address, BlobTransaction, CallPayload, DeployPayload, Transaction, TransactionReceipt,
+    TransactionStatus, TransferPayload, UtxoId, UtxoOutput, BLOB_RETENTION_SLOTS, CALL_PROGRAM_ID,
+    DEPLOY_PROGRAM_ID, MAX_BLOBS_PER_TX, MAX_BLOB_SIZE, TRANSFER_PROGRAM_ID,
 };

@@ -1,3 +1,4 @@
+mod chain;
 mod config;
 mod io;
 mod jobs;
@@ -50,6 +51,8 @@ enum Commands {
         #[command(subcommand)]
         command: JobCommands,
     },
+    /// Live chain: transfers, WASM contracts, accounts, blocks
+    Chain(chain::ChainArgs),
 }
 
 #[tokio::main]
@@ -62,6 +65,9 @@ async fn main() {
 
 async fn run() -> Result<()> {
     let cli = Cli::parse();
+    if let Commands::Chain(args) = &cli.command {
+        return args.execute().await;
+    }
     let config_path = cli.config.as_deref();
     let resolved = load_config(config_path)?;
 
@@ -71,6 +77,7 @@ async fn run() -> Result<()> {
         Commands::Transfer(cmd) => cmd.execute(&resolved).await?,
         Commands::Stake { command } => command.execute(&resolved).await?,
         Commands::Job { command } => command.execute(&resolved).await?,
+        Commands::Chain(_) => unreachable!("handled above"),
     }
 
     Ok(())

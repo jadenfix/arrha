@@ -149,6 +149,9 @@ impl TestNetwork {
                     OutboundMessage::BroadcastTransaction(tx) => {
                         self.pending_txs.push(tx);
                     }
+                    OutboundMessage::BroadcastTransactions(txs) => {
+                        self.pending_txs.extend(txs);
+                    }
                     OutboundMessage::RequestBlockRange { .. } => {
                         // Sync requests are ignored in multi-validator test harness
                     }
@@ -232,6 +235,9 @@ impl TestNetwork {
                         }
                         OutboundMessage::BroadcastTransaction(tx) => {
                             pending_txs.push((idx, tx));
+                        }
+                        OutboundMessage::BroadcastTransactions(txs) => {
+                            pending_txs.extend(txs.into_iter().map(|tx| (idx, tx)));
                         }
                         OutboundMessage::RequestBlockRange { .. } => {
                             // Sync requests are ignored in partitioned test harness

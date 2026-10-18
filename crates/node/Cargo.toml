@@ -38,6 +38,8 @@ aether-state-storage = { path = "../state/storage" }
 aether-state-snapshots = { path = "../state/snapshots" }
 aether-p2p = { path = "../p2p" }
 aether-metrics = { path = "../metrics" }
+aether-runtime = { path = "../runtime" }
+hex = "0.4"
 
 [[bench]]
 name = "block_bench"
@@ -49,5 +51,4 @@ proptest = "1"
 criterion.workspace = true
 aether-crypto-bls = { path = "../crypto/bls" }
 aether-crypto-vrf = { path = "../crypto/vrf" }
-aether-runtime = { path = "../runtime" }
 aether-quic-transport = { path = "../networking/quic-transport" }

@@ -10,6 +10,8 @@ pub enum NodeMessage {
     BlockReceived(Block),
     VoteReceived(Vote),
     TransactionReceived(Transaction),
+    /// A gossip batch of transactions.
+    TransactionsReceived(Vec<Transaction>),
     /// A peer requested blocks in the given slot range for state sync.
     BlockRangeRequested {
         from_slot: Slot,
@@ -26,6 +28,8 @@ pub enum OutboundMessage {
     BroadcastBlock(Block),
     BroadcastVote(Vote),
     BroadcastTransaction(Transaction),
+    /// Gossip many transactions in one message.
+    BroadcastTransactions(Vec<Transaction>),
     /// Request a range of blocks from peers for state sync.
     RequestBlockRange {
         from_slot: Slot,
@@ -46,7 +50,17 @@ pub struct SyncRequest {
 /// accepts a message the other rejects.
 const MAX_BLOCK_SIZE: usize = 2 * 1024 * 1024; // 2 MB — matches gossipsub max_transmit_size
 const MAX_VOTE_SIZE: usize = 8 * 1024; // 8 KB
-const MAX_TX_SIZE: usize = 64 * 1024; // 64 KB
+const MAX_TX_SIZE: usize = 1024 * 1024; // 1 MB (transaction gossip is batched)
+
+/// Prefix that marks a tx-topic message as a batch (`TXB1 || bincode(Vec<Transaction>)`).
+pub const TX_BATCH_MAGIC: &[u8; 4] = b"TXB1";
+
+/// Encode a batch of transactions for the tx gossip topic.
+pub fn encode_tx_batch(txs: &[Transaction]) -> Result<Vec<u8>, bincode::Error> {
+    let mut out = TX_BATCH_MAGIC.to_vec();
+    out.extend(bincode::serialize(txs)?);
+    Ok(out)
+}
 const MAX_SHRED_SIZE: usize = 256 * 1024; // 256 KB — RS(10,2) on 2 MB block ≈ 210 KB per shred
 const MAX_SYNC_SIZE: usize = 1024; // 1 KB
 
@@ -74,7 +88,12 @@ pub fn decode_network_event(event: NetworkEvent) -> Option<NodeMessage> {
             deserialize_bounded(&data, MAX_VOTE_SIZE).map(NodeMessage::VoteReceived)
         }
         NetworkEvent::TransactionReceived(data) if data.len() <= MAX_TX_SIZE => {
-            deserialize_bounded(&data, MAX_TX_SIZE).map(NodeMessage::TransactionReceived)
+            if data.starts_with(TX_BATCH_MAGIC) {
+                deserialize_bounded::<Vec<Transaction>>(&data[TX_BATCH_MAGIC.len()..], MAX_TX_SIZE)
+                    .map(NodeMessage::TransactionsReceived)
+            } else {
+                deserialize_bounded(&data, MAX_TX_SIZE).map(NodeMessage::TransactionReceived)
+            }
         }
         NetworkEvent::SyncRequestReceived(data) if data.len() <= MAX_SYNC_SIZE => {
             deserialize_bounded::<SyncRequest>(&data, MAX_SYNC_SIZE).map(|req| {

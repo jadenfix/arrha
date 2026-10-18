@@ -87,6 +87,39 @@ pub trait ConsensusEngine: Finality + Send + Sync {
     fn validator_addresses_and_stakes(&self) -> Vec<(aether_types::Address, u128)> {
         Vec::new()
     }
+
+    /// Record a quorum certificate that arrived embedded in a block (the node
+    /// has already verified its BLS aggregate and stake). Engines that track
+    /// certified blocks update their lock / finality from it.
+    fn on_qc(&mut self, _qc: &aether_types::AggregatedVote) {}
+
+    /// Validity checks for accepting/executing a proposal (leader proof,
+    /// slot bounds) WITHOUT the voting lock. Ancestors of certified blocks
+    /// must be accepted during catch-up even if they are below our lock.
+    fn verify_proposal(&self, block: &Block) -> Result<()> {
+        self.validate_block(block)
+    }
+
+    /// HotStuff safe-node rule: may this validator vote for `block`?
+    fn safe_to_vote(&self, _block: &Block) -> bool {
+        true
+    }
+
+    /// The quorum certificate this engine knows for `block_hash`, if any, in
+    /// the wire format that is embedded in child blocks.
+    fn qc_for(&self, _block_hash: &H256) -> Option<aether_types::AggregatedVote> {
+        None
+    }
+
+    /// Highest-slot certified block known to this engine.
+    fn high_qc(&self) -> Option<(H256, Slot)> {
+        None
+    }
+
+    /// Hash of the most recently finalized block, for engines that know it.
+    fn finalized_block(&self) -> Option<H256> {
+        None
+    }
 }
 
 /// Trivial finality for testing: every slot is immediately final.

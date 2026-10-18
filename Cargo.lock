@@ -147,6 +147,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "wat",
 ]
 
 [[package]]
@@ -421,7 +422,9 @@ dependencies = [
 name = "aether-loadgen"
 version = "0.1.0"
 dependencies = [
+ "aether-crypto-bls",
  "aether-crypto-primitives",
+ "aether-sdk",
  "aether-types",
  "anyhow",
  "bincode",
@@ -430,6 +433,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "wat",
 ]
 
 [[package]]
@@ -496,6 +500,7 @@ dependencies = [
  "bincode",
  "blake3",
  "criterion",
+ "hex",
  "proptest",
  "serde",
  "serde_json",

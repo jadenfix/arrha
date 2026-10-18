@@ -9,7 +9,7 @@ use aether_crypto_bls::{aggregate_public_keys, aggregate_signatures, BlsKeypair}
 use aether_crypto_vrf::{
     check_leader_eligibility_integer, EcVrfVerifier, VrfKeypair, VrfProof, VrfSigner, VrfVerifier,
 };
-use aether_types::{Address, Block, PublicKey, Slot, ValidatorInfo, Vote, H256};
+use aether_types::{Address, AggregatedVote, Block, PublicKey, Slot, ValidatorInfo, Vote, H256};
 use anyhow::{bail, Result};
 use sha2::{Digest, Sha256};
 use std::collections::hash_map::Entry;
@@ -58,6 +58,18 @@ fn div_256_by_128(hi: u128, lo: u128, divisor: u128) -> u128 {
         }
     }
     quotient
+}
+
+/// Votes are accepted for blocks up to this many slots old. Validators run
+/// in separate processes, so a vote for slot `s` routinely arrives after the
+/// receiver has moved on to `s + 1`.
+pub const VOTE_WINDOW_SLOTS: u64 = 64;
+
+/// A certified block: a quorum (>= 2/3 stake) of BLS votes for it.
+#[derive(Debug, Clone)]
+struct Certified {
+    slot: Slot,
+    qc: AggregatedVote,
 }
 
 /// HotStuff consensus phases
@@ -138,9 +150,14 @@ pub struct HybridConsensus {
     // === Pacemaker (timeout-based phase advancement) ===
     pacemaker: Pacemaker,
 
+    // === Certified blocks (QCs formed locally or received in blocks) ===
+    certified: HashMap<H256, Certified>,
+    high_qc: Option<(H256, Slot)>,
+
     // === Finality ===
     committed_slot: Slot,
     finalized_slot: Slot,
+    finalized_block: Option<H256>,
     last_reported_finalized: Slot,
 }
 
@@ -221,9 +238,90 @@ impl HybridConsensus {
             vrf_pubkeys: HashMap::new(),
             bls_pubkeys: HashMap::new(),
             pacemaker: Pacemaker::new(Duration::from_millis(500)),
+            certified: HashMap::new(),
+            high_qc: None,
             committed_slot: 0,
             finalized_slot: 0,
+            finalized_block: None,
             last_reported_finalized: 0,
+        }
+    }
+
+    /// Record that `block_hash` (at `slot`) is certified, update the lock and
+    /// high QC, and apply the 2-chain commit rule in both directions.
+    fn record_certified(&mut self, block_hash: H256, slot: Slot, qc: AggregatedVote) {
+        if self.certified.contains_key(&block_hash) {
+            return;
+        }
+        self.certified.insert(block_hash, Certified { slot, qc });
+        if self.high_qc.is_none_or(|(_, s)| slot > s) {
+            self.high_qc = Some((block_hash, slot));
+        }
+        // Lock on the highest certified block: we will only vote for blocks
+        // whose (certified) parent is at least this high.
+        if slot >= self.locked_slot {
+            self.locked_block = Some(block_hash);
+            self.locked_slot = slot;
+        }
+        if slot > self.committed_slot {
+            self.committed_slot = slot;
+        }
+        // This block may be the certified child of a certified parent...
+        self.try_commit_parent_of(block_hash);
+        // ...or the certified parent of an already-certified child.
+        let children: Vec<H256> = self
+            .block_parents
+            .iter()
+            .filter(|(_, parent)| **parent == block_hash)
+            .map(|(child, _)| *child)
+            .collect();
+        for child in children {
+            self.try_commit_parent_of(child);
+        }
+    }
+
+    /// 2-chain commit rule: if `child` and its parent are both certified and
+    /// the child is in the slot directly after the parent, the parent (and
+    /// all its ancestors) are final. Requiring consecutive slots is what
+    /// makes the 2-chain rule safe (as in DiemBFT v4 / Jolteon); a gap would
+    /// let a conflicting certified block exist in between.
+    fn try_commit_parent_of(&mut self, child: H256) {
+        let child_slot = match self.certified.get(&child) {
+            Some(c) => c.slot,
+            None => return,
+        };
+        let parent = match self.block_parents.get(&child) {
+            Some(p) => *p,
+            None => return,
+        };
+        let parent_slot = match self.certified.get(&parent) {
+            Some(c) => c.slot,
+            None => return,
+        };
+        if parent_slot.saturating_add(1) == child_slot && parent_slot > self.finalized_slot {
+            self.finalized_slot = parent_slot;
+            self.finalized_block = Some(parent);
+            tracing::info!(
+                finalized_slot = parent_slot,
+                child_slot,
+                "2-chain finality: block finalized via consecutive QCs"
+            );
+        }
+    }
+
+    /// Build the wire-format QC for a set of votes on one block.
+    fn wire_qc(&self, qc: &QuorumCertificate) -> AggregatedVote {
+        let signers = qc
+            .signers
+            .iter()
+            .filter_map(|addr| self.validators.get(addr).map(|v| v.pubkey.clone()))
+            .collect();
+        AggregatedVote {
+            slot: qc.slot,
+            block_hash: qc.block_hash,
+            aggregated_signature: qc.aggregated_signature.clone(),
+            signers,
+            total_stake: qc.total_stake,
         }
     }
 
@@ -386,10 +484,12 @@ impl HybridConsensus {
     /// 2. Stake verification — claimed stake must match validator registry
     /// 3. Unknown validator rejection
     pub fn process_vote(&mut self, vote: Vote) -> Result<Option<QuorumCertificate>> {
-        // Verify vote is for current slot
-        if vote.slot != self.current_slot {
+        // Accept votes for recent slots (and one slot of clock skew ahead).
+        if vote.slot > self.current_slot.saturating_add(1)
+            || vote.slot.saturating_add(VOTE_WINDOW_SLOTS) < self.current_slot
+        {
             bail!(
-                "vote for wrong slot: got {}, expected {}",
+                "vote for slot {} outside window around current slot {}",
                 vote.slot,
                 self.current_slot
             );
@@ -482,13 +582,15 @@ impl HybridConsensus {
         // Bound vote storage: limit unique block hashes per (slot, phase) to prevent
         // memory exhaustion from adversarial blocks. Validators can propose at most
         // validator_count blocks, so 2x that is generous.
+        // Every vote is a single-round vote for one block at one slot, so votes
+        // are keyed under the Propose phase regardless of local phase state.
         let max_block_hashes_per_phase = self.validators.len() * 2;
         let existing_hashes: usize = self
             .votes
             .keys()
-            .filter(|(s, p, _)| *s == vote.slot && *p == self.current_phase)
+            .filter(|(s, p, _)| *s == vote.slot && *p == Phase::Propose)
             .count();
-        let key = (vote.slot, self.current_phase.clone(), vote.block_hash);
+        let key = (vote.slot, Phase::Propose, vote.block_hash);
         if !self.votes.contains_key(&key) && existing_hashes >= max_block_hashes_per_phase {
             bail!(
                 "too many block candidates for slot {} (limit: {})",
@@ -526,11 +628,12 @@ impl HybridConsensus {
                     aggregated_pubkey: vec![],
                 };
                 self.qcs.insert(key, qc.clone());
-                if vote.slot > self.committed_slot {
-                    self.committed_slot = vote.slot;
-                }
+                let wire = self.wire_qc(&qc);
+                self.record_certified(vote.block_hash, vote.slot, wire);
+                // A single validator is its own quorum: certified == final.
                 if vote.slot > self.finalized_slot {
                     self.finalized_slot = vote.slot;
+                    self.finalized_block = Some(vote.block_hash);
                 }
                 self.pacemaker.on_commit();
                 return Ok(Some(qc));
@@ -541,82 +644,10 @@ impl HybridConsensus {
             let qc = self.aggregate_votes(&votes_vec)?;
             self.qcs.insert(key, qc.clone());
 
-            // 2-CHAIN FINALITY RULE
-            //
-            // Because advance_slot() resets the phase to Propose every slot,
-            // only Propose-phase QCs ever form in multi-validator mode.
-            // The Prevote/Precommit/Commit branches below are kept for
-            // correctness if the protocol later adds intra-slot phase
-            // progression, but the Propose branch now carries the
-            // production finality logic:
-            //
-            //   Block B is finalized when:
-            //     1. B has a QC (from its own slot's Propose phase)
-            //     2. B's child C also has a QC (current slot's Propose phase)
-            //     3. C.parent_hash == B.hash
-            //
-            match self.current_phase {
-                Phase::Propose => {
-                    // QC formed for this block (child C).  Check if parent
-                    // block B already has a QC — if so, B is finalized.
-                    if let Some(parent_hash) = self.block_parents.get(&vote.block_hash).copied() {
-                        if let Some(&parent_slot) = self.block_slots.get(&parent_hash) {
-                            // Parent's QC was also formed in Propose phase
-                            let parent_key = (parent_slot, Phase::Propose, parent_hash);
-                            if self.qcs.contains_key(&parent_key)
-                                && parent_slot > self.finalized_slot
-                            {
-                                self.finalized_slot = parent_slot;
-                                tracing::info!(
-                                    finalized_slot = parent_slot,
-                                    child_slot = vote.slot,
-                                    "2-chain finality: block finalized via consecutive QCs"
-                                );
-                            }
-                        }
-                    }
-                    // Lock on this block (it has a QC)
-                    self.locked_block = Some(vote.block_hash);
-                    self.locked_slot = vote.slot;
-                    // Track committed slot
-                    if vote.slot > self.committed_slot {
-                        self.committed_slot = vote.slot;
-                    }
-                }
-                Phase::Prevote => {
-                    // Prevote QC formed → lock on this block
-                    self.locked_block = Some(vote.block_hash);
-                    self.locked_slot = vote.slot;
-                }
-                Phase::Precommit => {
-                    // Precommit QC formed → check 2-chain finality rule
-                    // (same logic, but keyed on Prevote QC for parent)
-                    if let Some(parent_hash) = self.block_parents.get(&vote.block_hash).copied() {
-                        if let Some(&parent_slot) = self.block_slots.get(&parent_hash) {
-                            let prevote_key = (parent_slot, Phase::Prevote, parent_hash);
-                            if self.qcs.contains_key(&prevote_key)
-                                && parent_slot > self.finalized_slot
-                            {
-                                self.finalized_slot = parent_slot;
-                                tracing::info!(
-                                    finalized_slot = parent_slot,
-                                    child_slot = vote.slot,
-                                    "2-chain finality: slot finalized via precommit QC"
-                                );
-                            }
-                        }
-                    }
-                    if vote.slot > self.committed_slot {
-                        self.committed_slot = vote.slot;
-                    }
-                }
-                Phase::Commit => {}
-            }
-
-            // CRITICAL: Advance phase after QC formation.
-            // This drives the HotStuff state machine:
-            // Propose → Prevote → Precommit → Commit → Propose
-            self.advance_phase();
+            // Record the certified block. This updates the lock / high QC and
+            // applies the 2-chain commit rule (see `try_commit_parent_of`).
+            let wire = self.wire_qc(&qc);
+            self.record_certified(vote.block_hash, vote.slot, wire);
             self.pacemaker.on_commit();
             return Ok(Some(qc));
         }
@@ -653,7 +684,9 @@ impl HybridConsensus {
         let mut rejected: Vec<(usize, String)> = Vec::new();
 
         for (i, vote) in votes.iter().enumerate() {
-            if vote.slot != self.current_slot {
+            if vote.slot > self.current_slot.saturating_add(1)
+                || vote.slot.saturating_add(VOTE_WINDOW_SLOTS) < self.current_slot
+            {
                 rejected.push((i, format!("wrong slot: {}", vote.slot)));
                 continue;
             }
@@ -829,6 +862,9 @@ impl crate::Finality for HybridConsensus {
     fn record_block(&mut self, block_hash: H256, parent_hash: H256, slot: Slot) {
         self.block_parents.insert(block_hash, parent_hash);
         self.block_slots.insert(block_hash, slot);
+        // Votes (and so the QC) for a block can arrive before the block itself;
+        // re-check the commit rule now that its parent is known.
+        self.try_commit_parent_of(block_hash);
     }
 }
 
@@ -840,11 +876,18 @@ impl ConsensusEngine for HybridConsensus {
     fn advance_slot(&mut self) {
         self.current_slot = self.current_slot.saturating_add(1);
         self.current_phase = Phase::Propose;
-        self.votes.clear();
+        // Keep votes for recent slots: they may still complete a quorum.
+        let vote_floor = self.current_slot.saturating_sub(VOTE_WINDOW_SLOTS);
+        self.votes.retain(|(slot, _, _), _| *slot >= vote_floor);
 
         // Prune old consensus state to bound memory growth.
         // Keep only data from the last 200 slots.
         let prune_before = self.current_slot.saturating_sub(200);
+        let finalized_block = self.finalized_block;
+        let high = self.high_qc.map(|(h, _)| h);
+        self.certified.retain(|hash, c| {
+            c.slot >= prune_before || Some(*hash) == finalized_block || Some(*hash) == high
+        });
         self.vote_record
             .retain(|(slot, _), _| *slot >= prune_before);
         self.qcs.retain(|(slot, _, _), _| *slot >= prune_before);
@@ -886,8 +929,27 @@ impl ConsensusEngine for HybridConsensus {
     }
 
     fn validate_block(&self, block: &Block) -> Result<()> {
-        // Check slot is valid
-        if block.header.slot > self.current_slot {
+        self.verify_proposal(block)?;
+        if !self.safe_to_vote(block) {
+            let parent_slot = self
+                .block_slots
+                .get(&block.header.parent_hash)
+                .copied()
+                .unwrap_or(0);
+            bail!(
+                "block does not extend locked block and parent slot {} < locked slot {} \
+                 (safe node predicate failed)",
+                parent_slot,
+                self.locked_slot
+            );
+        }
+        Ok(())
+    }
+
+    fn verify_proposal(&self, block: &Block) -> Result<()> {
+        // Check slot is valid (one slot of tolerance for clock skew between
+        // validator processes that tick on their own wall-clock timers).
+        if block.header.slot > self.current_slot.saturating_add(1) {
             bail!("block from future slot");
         }
 
@@ -909,32 +971,25 @@ impl ConsensusEngine for HybridConsensus {
         if !self.verify_leader_eligibility(block)? {
             bail!("invalid leader proof");
         }
+        Ok(())
+    }
 
-        // HotStuff safe node predicate: accept block if it extends the locked block,
-        // OR if its parent is at a slot >= our locked slot (meaning a quorum has moved
-        // past our lock, making it safe to vote for a new branch after a view change).
-        // Without this, validators can deadlock after a timeout if the locked block's
-        // chain stalls — the new leader's block extending a different branch would be
-        // permanently rejected.
-        if let Some(locked) = &self.locked_block {
-            if block.header.parent_hash != *locked {
+    /// HotStuff safe node predicate: vote for a block only if it extends the
+    /// locked block, or if its parent is at a slot >= our locked slot (a
+    /// quorum has moved past our lock).
+    fn safe_to_vote(&self, block: &Block) -> bool {
+        match &self.locked_block {
+            None => true,
+            Some(locked) if block.header.parent_hash == *locked => true,
+            Some(_) => {
                 let parent_slot = self
                     .block_slots
                     .get(&block.header.parent_hash)
                     .copied()
                     .unwrap_or(0);
-                if parent_slot < self.locked_slot {
-                    bail!(
-                        "block does not extend locked block and parent slot {} < locked slot {} \
-                         (safe node predicate failed)",
-                        parent_slot,
-                        self.locked_slot
-                    );
-                }
+                parent_slot >= self.locked_slot
             }
         }
-
-        Ok(())
     }
 
     fn add_vote(&mut self, vote: Vote) -> Result<()> {
@@ -964,11 +1019,9 @@ impl ConsensusEngine for HybridConsensus {
 
     fn on_timeout(&mut self) {
         self.pacemaker.on_timeout();
-        // On timeout, reset to Propose phase for the next slot.
-        // Simply advancing one phase would leave the node in a stale phase
-        // (e.g., Precommit→Commit with no precommit QC), breaking liveness.
+        // On timeout, reset to Propose phase for the next slot. Collected votes
+        // are kept: a late quorum for a recent block is still valid.
         self.current_phase = Phase::Propose;
-        self.votes.clear();
     }
 
     fn advance_pacemaker_to_round(&mut self, round: u64) {
@@ -1005,6 +1058,22 @@ impl ConsensusEngine for HybridConsensus {
             .filter(|(_, v)| v.stake > 0)
             .map(|(addr, v)| (*addr, v.stake))
             .collect()
+    }
+
+    fn on_qc(&mut self, qc: &AggregatedVote) {
+        self.record_certified(qc.block_hash, qc.slot, qc.clone());
+    }
+
+    fn qc_for(&self, block_hash: &H256) -> Option<AggregatedVote> {
+        self.certified.get(block_hash).map(|c| c.qc.clone())
+    }
+
+    fn high_qc(&self) -> Option<(H256, Slot)> {
+        self.high_qc
+    }
+
+    fn finalized_block(&self) -> Option<H256> {
+        self.finalized_block
     }
 }
 

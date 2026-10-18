@@ -4,31 +4,128 @@ use aether_state_storage::{
     Storage, StorageBatch, CF_ACCOUNTS, CF_METADATA, CF_SPENT_UTXOS, CF_UTXOS,
 };
 use aether_types::{
-    Account, Address, Transaction, TransactionReceipt, TransactionStatus, TransferPayload, Utxo,
-    UtxoId, H256, TRANSFER_PROGRAM_ID,
+    contract_address, Account, Address, CallPayload, DeployPayload, Transaction,
+    TransactionReceipt, TransactionStatus, TransferPayload, Utxo, UtxoId, CALL_PROGRAM_ID,
+    DEPLOY_PROGRAM_ID, H256, TRANSFER_PROGRAM_ID,
 };
 use anyhow::{anyhow, bail, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
+
+/// Metadata key prefix for contract code (`code:` || code_hash).
+const CONTRACT_CODE_PREFIX: &[u8] = b"code:";
+/// Metadata key prefix for contract storage (`cstore:` || address).
+const CONTRACT_STORAGE_PREFIX: &[u8] = b"cstore:";
+/// Maximum deployable contract size.
+pub const MAX_CONTRACT_CODE_BYTES: usize = 64 * 1024;
+
+/// Block-level context passed to contract execution. Every validator derives
+/// these values from the block header, so execution stays deterministic.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BlockContext {
+    pub slot: u64,
+    pub timestamp: u64,
+}
+
+/// A single contract invocation handed to a [`ContractExecutor`].
+pub struct ContractCall<'a> {
+    pub code: &'a [u8],
+    pub code_hash: H256,
+    pub contract: Address,
+    pub caller: Address,
+    pub input: &'a [u8],
+    pub gas_limit: u64,
+    pub context: BlockContext,
+    /// Full current storage of the contract.
+    pub storage: HashMap<Vec<u8>, Vec<u8>>,
+}
+
+/// Result of a contract invocation.
+pub struct ContractOutcome {
+    pub success: bool,
+    pub gas_used: u64,
+    /// Full storage of the contract after execution.
+    pub storage: HashMap<Vec<u8>, Vec<u8>>,
+    pub logs: Vec<Vec<u8>>,
+    pub return_data: Vec<u8>,
+}
+
+/// Executes contract code. The ledger is runtime-agnostic; the node plugs in
+/// the wasmtime-based VM from `aether-runtime`.
+pub trait ContractExecutor: Send + Sync {
+    /// Check that `code` is a loadable module (deterministic accept/reject).
+    fn validate(&self, code: &[u8]) -> Result<()>;
+    fn execute(&self, call: ContractCall<'_>) -> Result<ContractOutcome>;
+}
+
+/// State changes produced by a deploy or call, applied only if the whole
+/// transaction validates.
+struct ContractEffects {
+    account: Account,
+    code: Option<(H256, Vec<u8>)>,
+    storage_bytes: Vec<u8>,
+    logs: Vec<Vec<u8>>,
+    gas_used: u64,
+}
+
+fn sha256_h256(bytes: &[u8]) -> H256 {
+    use sha2::{Digest, Sha256};
+    H256(Sha256::digest(bytes).into())
+}
+
+fn contract_code_key(code_hash: &H256) -> Vec<u8> {
+    let mut key = CONTRACT_CODE_PREFIX.to_vec();
+    key.extend_from_slice(code_hash.as_bytes());
+    key
+}
+
+fn contract_storage_key(address: &Address) -> Vec<u8> {
+    let mut key = CONTRACT_STORAGE_PREFIX.to_vec();
+    key.extend_from_slice(address.as_bytes());
+    key
+}
 
 /// In-memory overlay for speculative block execution.
 /// Reads check overlay first, falls back to storage. Writes stay in memory
 /// until explicitly committed via `commit_overlay()`.
+///
+/// Overlays can be chained: a block executed on top of a not-yet-finalized
+/// parent gets an overlay whose `parent` is the parent block's overlay, so
+/// reads see every pending ancestor before falling back to (finalized)
+/// storage. `writes`/`deletes` only hold this block's own delta.
 #[derive(Debug)]
 pub struct PendingOverlay {
     pub writes: HashMap<(String, Vec<u8>), Vec<u8>>,
     pub deletes: HashSet<(String, Vec<u8>)>,
     pub changed_accounts: Vec<Address>,
     pub state_root: H256,
+    parent: RwLock<Option<Arc<PendingOverlay>>>,
 }
 
 impl PendingOverlay {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_parent(None)
+    }
+
+    /// Create an empty overlay layered on top of `parent`.
+    pub fn with_parent(parent: Option<Arc<PendingOverlay>>) -> Self {
         PendingOverlay {
             writes: HashMap::new(),
             deletes: HashSet::new(),
             changed_accounts: Vec::new(),
             state_root: H256::zero(),
+            parent: RwLock::new(parent),
+        }
+    }
+
+    /// Drop the link to the parent overlay. Called once this overlay's
+    /// ancestors have been written to storage, so reads fall through to disk
+    /// and finalized overlays can be freed.
+    pub fn detach_parent(&self) {
+        if let Ok(mut guard) = self.parent.write() {
+            *guard = None;
         }
     }
 
@@ -42,18 +139,34 @@ impl PendingOverlay {
         self.deletes.insert((cf.to_string(), key));
     }
 
-    fn get(&self, cf: &str, key: &[u8]) -> Option<Option<Vec<u8>>> {
+    /// Look up `key` in this overlay and then its pending ancestors.
+    /// `None` means "not touched by any pending block, read storage".
+    pub fn get(&self, cf: &str, key: &[u8]) -> Option<Option<Vec<u8>>> {
         let map_key = (cf.to_string(), key.to_vec());
         if self.deletes.contains(&map_key) {
             return Some(None); // Deleted in overlay
         }
-        self.writes.get(&map_key).map(|v| Some(v.clone()))
+        if let Some(v) = self.writes.get(&map_key) {
+            return Some(Some(v.clone()));
+        }
+        let mut next = self.parent.read().ok().and_then(|p| p.clone());
+        while let Some(layer) = next {
+            if layer.deletes.contains(&map_key) {
+                return Some(None);
+            }
+            if let Some(v) = layer.writes.get(&map_key) {
+                return Some(Some(v.clone()));
+            }
+            next = layer.parent.read().ok().and_then(|p| p.clone());
+        }
+        None
     }
 }
 
 pub struct Ledger {
     storage: Storage,
     merkle_tree: SparseMerkleTree,
+    executor: Option<Arc<dyn ContractExecutor>>,
 }
 
 impl Ledger {
@@ -61,6 +174,7 @@ impl Ledger {
         let mut ledger = Ledger {
             storage,
             merkle_tree: SparseMerkleTree::new(),
+            executor: None,
         };
 
         ledger.load_state_root()?;
@@ -82,6 +196,64 @@ impl Ledger {
 
     pub fn state_root(&self) -> H256 {
         self.merkle_tree.root()
+    }
+
+    /// Install the contract runtime. Without one, deploy/call transactions fail.
+    pub fn set_contract_executor(&mut self, executor: Arc<dyn ContractExecutor>) {
+        self.executor = Some(executor);
+    }
+
+    /// The Merkle tree of the finalized (on-disk) state.
+    pub fn merkle_tree(&self) -> &SparseMerkleTree {
+        &self.merkle_tree
+    }
+
+    /// Read an account as seen by a pending overlay (or finalized storage).
+    pub fn account_in(
+        &self,
+        overlay: Option<&PendingOverlay>,
+        address: &Address,
+    ) -> Result<Account> {
+        match overlay {
+            Some(o) => self.get_account_from_overlay(o, address),
+            None => self.get_or_create_account(address),
+        }
+    }
+
+    /// Read a contract's storage map as seen by a pending overlay.
+    pub fn contract_storage_in(
+        &self,
+        overlay: Option<&PendingOverlay>,
+        address: &Address,
+    ) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
+        let key = contract_storage_key(address);
+        let raw = match overlay {
+            Some(o) => self.read_raw(o, CF_METADATA, &key)?,
+            None => self.storage.get(CF_METADATA, &key)?,
+        };
+        match raw {
+            Some(bytes) => Ok(bincode::deserialize(&bytes)?),
+            None => Ok(BTreeMap::new()),
+        }
+    }
+
+    /// Read a contract's storage map from finalized state.
+    pub fn get_contract_storage(&self, address: &Address) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
+        match self
+            .storage
+            .get(CF_METADATA, &contract_storage_key(address))?
+        {
+            Some(bytes) => Ok(bincode::deserialize(&bytes)?),
+            None => Ok(BTreeMap::new()),
+        }
+    }
+
+    /// Read `key` from (overlay, then storage).
+    fn read_raw(&self, overlay: &PendingOverlay, cf: &str, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        match overlay.get(cf, key) {
+            Some(v) => Ok(v),
+            None => Ok(self.storage.get(cf, key)?),
+        }
     }
 
     /// Access the underlying storage (for block/receipt persistence).
@@ -574,15 +746,45 @@ impl Ledger {
         transactions: &[Transaction],
         expected_chain_id: Option<u64>,
     ) -> Result<(Vec<TransactionReceipt>, PendingOverlay)> {
+        let base_tree = self.merkle_tree.clone();
+        let (receipts, overlay, _tree) = self.apply_block_on(
+            None,
+            base_tree,
+            transactions,
+            expected_chain_id,
+            BlockContext::default(),
+        )?;
+        Ok((receipts, overlay))
+    }
+
+    /// Execute `transactions` on top of a pending parent state.
+    ///
+    /// `parent` is the parent block's overlay (or `None` when the parent is the
+    /// finalized on-disk state) and `base_tree` is the Merkle tree after the
+    /// parent. Nothing is written to storage. Returns the receipts, this
+    /// block's delta overlay (chained to `parent`) and the post-block tree.
+    ///
+    /// Every receipt's `state_root` is the post-block state root: the tree is
+    /// recomputed once per block instead of once per transaction.
+    pub fn apply_block_on(
+        &self,
+        parent: Option<Arc<PendingOverlay>>,
+        base_tree: SparseMerkleTree,
+        transactions: &[Transaction],
+        expected_chain_id: Option<u64>,
+        context: BlockContext,
+    ) -> Result<(Vec<TransactionReceipt>, PendingOverlay, SparseMerkleTree)> {
         let _span = tracing::info_span!("apply_block_speculative", tx_count = transactions.len(),)
             .entered();
         let start = Instant::now();
-        let mut overlay = PendingOverlay::new();
-        let mut receipts = Vec::new();
+        let mut overlay = PendingOverlay::with_parent(parent);
+        let mut spec_tree = base_tree;
+        let mut receipts = Vec::with_capacity(transactions.len());
 
         if transactions.is_empty() {
-            overlay.state_root = self.state_root();
-            return Ok((receipts, overlay));
+            spec_tree.recompute();
+            overlay.state_root = spec_tree.root();
+            return Ok((receipts, overlay, spec_tree));
         }
 
         for tx in transactions {
@@ -599,9 +801,6 @@ impl Ledger {
         let batch_results = ed25519::verify_batch(&batch_inputs)
             .map_err(|e| anyhow!("batch signature verification failed: {e:?}"))?;
 
-        // Clone the merkle tree for speculative root computation
-        let mut spec_tree = self.merkle_tree.clone();
-
         for (tx, is_valid) in transactions.iter().zip(batch_results.iter()) {
             if !*is_valid {
                 bail!(
@@ -611,7 +810,7 @@ impl Ledger {
             }
         }
 
-        for (tx, _is_valid) in transactions.iter().zip(batch_results) {
+        for tx in transactions {
             // Validate chain_id to prevent cross-chain replay attacks
             if let Some(expected_id) = expected_chain_id {
                 if tx.chain_id != expected_id {
@@ -627,13 +826,13 @@ impl Ledger {
                         },
                         gas_used: 0,
                         logs: vec![],
-                        state_root: spec_tree.root(),
+                        state_root: H256::zero(),
                     });
                     continue;
                 }
             }
 
-            match self.apply_tx_to_overlay(tx, &mut overlay, &mut spec_tree) {
+            match self.apply_tx_to_overlay(tx, &mut overlay, &mut spec_tree, &context) {
                 Ok(receipt) => receipts.push(receipt),
                 Err(e) => {
                     receipts.push(TransactionReceipt {
@@ -645,19 +844,197 @@ impl Ledger {
                         },
                         gas_used: 0,
                         logs: vec![],
-                        state_root: spec_tree.root(),
+                        state_root: H256::zero(),
                     });
                 }
             }
         }
 
-        overlay.state_root = spec_tree.root();
+        spec_tree.recompute();
+        let root = spec_tree.root();
+        for receipt in &mut receipts {
+            receipt.state_root = root;
+        }
+        overlay.state_root = root;
         tracing::info!(
             elapsed_us = start.elapsed().as_micros() as u64,
             tx_count = transactions.len(),
             "Speculative block execution complete"
         );
-        Ok((receipts, overlay))
+        Ok((receipts, overlay, spec_tree))
+    }
+
+    /// Credit the proposer reward and accumulate burn/treasury totals inside
+    /// a pending overlay (so descendants of this block observe them and the
+    /// result is identical on every validator). Updates `tree` lazily.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_fee_distribution(
+        &self,
+        overlay: &mut PendingOverlay,
+        tree: &mut SparseMerkleTree,
+        proposer: &Address,
+        proposer_reward: u128,
+        burned: u128,
+        treasury_fee: u128,
+    ) -> Result<()> {
+        if proposer_reward > 0 {
+            let mut account = self.get_account_from_overlay(overlay, proposer)?;
+            account.balance = account
+                .balance
+                .checked_add(proposer_reward)
+                .ok_or_else(|| anyhow!("proposer balance overflow"))?;
+            overlay.put(
+                CF_ACCOUNTS,
+                proposer.as_bytes().to_vec(),
+                bincode::serialize(&account)?,
+            );
+            overlay.changed_accounts.push(*proposer);
+            tree.set_leaf(*proposer, self.hash_account(&account));
+        }
+        for (key, amount) in [
+            (&b"total_burned"[..], burned),
+            (&b"total_treasury_fees"[..], treasury_fee),
+        ] {
+            if amount == 0 {
+                continue;
+            }
+            let current = self
+                .read_raw(overlay, CF_METADATA, key)?
+                .map(|bytes| {
+                    let mut arr = [0u8; 16];
+                    let n = 16.min(bytes.len());
+                    arr[..n].copy_from_slice(&bytes[..n]);
+                    u128::from_le_bytes(arr)
+                })
+                .unwrap_or(0);
+            let new_total = current
+                .checked_add(amount)
+                .ok_or_else(|| anyhow!("fee accounting overflow"))?;
+            overlay.put(CF_METADATA, key.to_vec(), new_total.to_le_bytes().to_vec());
+        }
+        tree.recompute();
+        overlay.state_root = tree.root();
+        Ok(())
+    }
+
+    /// Write one pending block's own delta (plus `extra` block/receipt data)
+    /// to storage atomically, and adopt `tree` as the finalized state tree.
+    ///
+    /// Pending blocks must be committed parent-first.
+    pub fn commit_pending(
+        &mut self,
+        overlay: &PendingOverlay,
+        tree: &SparseMerkleTree,
+        extra: StorageBatch,
+    ) -> Result<()> {
+        let mut batch = StorageBatch::new();
+        for ((cf, key), value) in &overlay.writes {
+            batch.put(cf, key.clone(), value.clone());
+        }
+        for (cf, key) in &overlay.deletes {
+            batch.delete(cf, key.clone());
+        }
+        let mut tree = tree.clone();
+        tree.recompute();
+        batch.put(
+            CF_METADATA,
+            b"state_root".to_vec(),
+            tree.root().as_bytes().to_vec(),
+        );
+        batch.extend(extra);
+        self.storage.write_batch(batch)?;
+        self.merkle_tree = tree;
+        Ok(())
+    }
+
+    /// Run a deploy or call transaction. Returns `None` for other programs.
+    fn execute_contract(
+        &self,
+        tx: &Transaction,
+        overlay: &PendingOverlay,
+        context: &BlockContext,
+    ) -> Result<Option<ContractEffects>> {
+        let program = match tx.program_id {
+            Some(p) if p == DEPLOY_PROGRAM_ID || p == CALL_PROGRAM_ID => p,
+            _ => return Ok(None),
+        };
+        let executor = self
+            .executor
+            .as_ref()
+            .ok_or_else(|| anyhow!("contract runtime not available on this node"))?;
+
+        if program == DEPLOY_PROGRAM_ID {
+            let payload: DeployPayload = bincode::deserialize(&tx.data)
+                .map_err(|e| anyhow!("invalid deploy payload: {e}"))?;
+            if payload.code.is_empty() || payload.code.len() > MAX_CONTRACT_CODE_BYTES {
+                bail!(
+                    "contract code must be 1..={} bytes, got {}",
+                    MAX_CONTRACT_CODE_BYTES,
+                    payload.code.len()
+                );
+            }
+            executor.validate(&payload.code)?;
+            let address = contract_address(&tx.sender, tx.nonce);
+            let existing = self.get_account_from_overlay(overlay, &address)?;
+            if existing.code_hash.is_some() {
+                bail!("contract already deployed at {:?}", address);
+            }
+            let code_hash = sha256_h256(&payload.code);
+            let storage: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
+            let storage_bytes = bincode::serialize(&storage)?;
+            let mut account = existing;
+            account.code_hash = Some(code_hash);
+            account.storage_root = sha256_h256(&storage_bytes);
+            return Ok(Some(ContractEffects {
+                account,
+                code: Some((code_hash, payload.code)),
+                storage_bytes,
+                logs: vec![],
+                gas_used: 0,
+            }));
+        }
+
+        let payload: CallPayload =
+            bincode::deserialize(&tx.data).map_err(|e| anyhow!("invalid call payload: {e}"))?;
+        let account = self.get_account_from_overlay(overlay, &payload.contract)?;
+        let code_hash = account
+            .code_hash
+            .ok_or_else(|| anyhow!("no contract at {:?}", payload.contract))?;
+        let code = self
+            .read_raw(overlay, CF_METADATA, &contract_code_key(&code_hash))?
+            .ok_or_else(|| anyhow!("contract code missing for {:?}", payload.contract))?;
+        let current: BTreeMap<Vec<u8>, Vec<u8>> = match self.read_raw(
+            overlay,
+            CF_METADATA,
+            &contract_storage_key(&payload.contract),
+        )? {
+            Some(bytes) => bincode::deserialize(&bytes)?,
+            None => BTreeMap::new(),
+        };
+        let outcome = executor.execute(ContractCall {
+            code: &code,
+            code_hash,
+            contract: payload.contract,
+            caller: tx.sender,
+            input: &payload.input,
+            gas_limit: tx.gas_limit,
+            context: *context,
+            storage: current.into_iter().collect(),
+        })?;
+        if !outcome.success {
+            bail!("contract execution failed (gas used {})", outcome.gas_used);
+        }
+        let storage: BTreeMap<Vec<u8>, Vec<u8>> = outcome.storage.into_iter().collect();
+        let storage_bytes = bincode::serialize(&storage)?;
+        let mut account = account;
+        account.storage_root = sha256_h256(&storage_bytes);
+        Ok(Some(ContractEffects {
+            account,
+            code: None,
+            storage_bytes,
+            logs: outcome.logs,
+            gas_used: outcome.gas_used,
+        }))
     }
 
     /// Apply a single transaction to the overlay (not to disk).
@@ -666,6 +1043,7 @@ impl Ledger {
         tx: &Transaction,
         overlay: &mut PendingOverlay,
         spec_tree: &mut SparseMerkleTree,
+        context: &BlockContext,
     ) -> Result<TransactionReceipt> {
         // Read sender account from overlay first, then storage
         let mut sender_account = self.get_account_from_overlay(overlay, &tx.sender)?;
@@ -786,6 +1164,14 @@ impl Ledger {
             bail!("UTxO inputs insufficient for outputs");
         }
 
+        // Contract deploy/call runs last: it is the most expensive check and
+        // its effects are only applied if everything else validated.
+        let contract_effects = if transfer_payload.is_none() && !is_utxo_tx {
+            self.execute_contract(tx, overlay, context)?
+        } else {
+            None
+        };
+
         // --- All validation passed; now write to overlay ---
 
         // Write account changes to overlay
@@ -793,9 +1179,9 @@ impl Ledger {
         overlay.put(CF_ACCOUNTS, tx.sender.as_bytes().to_vec(), sender_bytes);
         overlay.changed_accounts.push(tx.sender);
 
-        // Update speculative merkle tree
+        // Update speculative merkle tree (root recomputed once per block)
         let sender_hash = self.hash_account(&sender_account);
-        spec_tree.update(sender_account.address, sender_hash);
+        spec_tree.set_leaf(sender_account.address, sender_hash);
 
         if let Some(ref recipient) = recipient_account {
             let recipient_bytes = bincode::serialize(recipient)?;
@@ -807,7 +1193,38 @@ impl Ledger {
             overlay.changed_accounts.push(recipient.address);
 
             let recipient_hash = self.hash_account(recipient);
-            spec_tree.update(recipient.address, recipient_hash);
+            spec_tree.set_leaf(recipient.address, recipient_hash);
+        }
+
+        let mut gas_used = 0u64;
+        let mut logs = Vec::new();
+        if let Some(effects) = contract_effects {
+            let address = effects.account.address;
+            if let Some((code_hash, code)) = effects.code {
+                overlay.put(CF_METADATA, contract_code_key(&code_hash), code);
+            }
+            overlay.put(
+                CF_METADATA,
+                contract_storage_key(&address),
+                effects.storage_bytes,
+            );
+            overlay.put(
+                CF_ACCOUNTS,
+                address.as_bytes().to_vec(),
+                bincode::serialize(&effects.account)?,
+            );
+            overlay.changed_accounts.push(address);
+            spec_tree.set_leaf(address, self.hash_account(&effects.account));
+            gas_used = effects.gas_used;
+            logs = effects
+                .logs
+                .into_iter()
+                .map(|data| aether_types::transaction::Log {
+                    address,
+                    topics: vec![],
+                    data,
+                })
+                .collect();
         }
 
         // Delete consumed UTxOs from overlay
@@ -838,9 +1255,10 @@ impl Ledger {
             block_hash: H256::zero(),
             slot: 0,
             status: TransactionStatus::Success,
-            gas_used: 0,
-            logs: vec![],
-            state_root: spec_tree.root(),
+            gas_used,
+            logs,
+            // Filled with the post-block root by `apply_block_on`.
+            state_root: H256::zero(),
         })
     }
 
@@ -952,6 +1370,29 @@ impl Ledger {
         batch.put(CF_ACCOUNTS, key, value);
         // Include state root in same atomic batch
         self.update_state_root_incremental(&account, None, Some(&mut batch))?;
+        self.storage.write_batch(batch)?;
+        Ok(())
+    }
+
+    /// Seed many genesis balances in one atomic batch (one Merkle recompute).
+    pub fn seed_accounts(&mut self, accounts: &[(Address, u128)]) -> Result<()> {
+        let mut batch = StorageBatch::new();
+        for (address, balance) in accounts {
+            let account = Account::with_balance(*address, *balance);
+            batch.put(
+                CF_ACCOUNTS,
+                address.as_bytes().to_vec(),
+                bincode::serialize(&account)?,
+            );
+            self.merkle_tree
+                .set_leaf(*address, self.hash_account(&account));
+        }
+        self.merkle_tree.recompute();
+        batch.put(
+            CF_METADATA,
+            b"state_root".to_vec(),
+            self.merkle_tree.root().as_bytes().to_vec(),
+        );
         self.storage.write_batch(batch)?;
         Ok(())
     }

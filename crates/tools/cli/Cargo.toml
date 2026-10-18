@@ -20,6 +20,7 @@ toml = "0.8"
 dirs = "5"
 clap = { version = "4.5", features = ["derive"] }
 hex = "0.4"
+wat = "1"
 
 aether-types = { path = "../../types" }
 aether-crypto-primitives = { path = "../../crypto/primitives" }

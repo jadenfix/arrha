@@ -1,0 +1,31 @@
+{
+  "accepted": 12000,
+  "blocks": {
+    "finalizedBlocksDuringRun": 42,
+    "maxTxsPerBlock": 476,
+    "meanFinalizedBlockIntervalMs": 939.0243902439024,
+    "meanTxsPerBlock": 280.2857142857143,
+    "p50FinalizedBlockIntervalMs": 500,
+    "slotsDuringRun": 80.002
+  },
+  "contract": null,
+  "durationS": 40,
+  "endpoints": 4,
+  "finalityMs": {
+    "max": 4593,
+    "p50": 1721,
+    "p95": 3760,
+    "p99": 4294,
+    "samples": 9006
+  },
+  "finalized": 12000,
+  "finalizedTpsSteadyWindow": 300.05666477784075,
+  "generated": 12000,
+  "mode": "transfer",
+  "notFinalizedAfterDrain": 0,
+  "offeredRateTps": 300,
+  "rejectSamples": [],
+  "rejectedAtSubmit": 0,
+  "senders": 15,
+  "warmupS": 10
+}

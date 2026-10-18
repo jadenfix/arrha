@@ -18,6 +18,9 @@ const SUITE_STRING: u8 = 0x04; // ECVRF-EDWARDS25519-SHA512-ELL2
 
 #[derive(Clone, Debug)]
 pub struct VrfKeypair {
+    /// The 32-byte seed the scalar was derived from. Persisted key files store
+    /// this seed so that `from_secret(secret_bytes())` round-trips exactly.
+    seed: [u8; 32],
     secret: Scalar,
     public: EdwardsPoint,
     public_bytes: [u8; 32],
@@ -34,6 +37,7 @@ impl Drop for VrfKeypair {
         use zeroize::Zeroize;
         // Overwrite secret scalar with zero to prevent memory recovery
         self.secret = Scalar::ZERO;
+        self.seed.zeroize();
         self.public_bytes.zeroize();
     }
 }
@@ -49,12 +53,18 @@ impl VrfKeypair {
         Self::from_secret_bytes(&secret_bytes)
     }
 
-    /// Export the secret key bytes (for key persistence).
-    /// WARNING: Handle with care — this is the raw secret key.
+    /// Export the secret seed bytes (for key persistence).
+    ///
+    /// Returns the 32-byte seed accepted by [`VrfKeypair::from_secret`], so a
+    /// keypair written to disk and loaded back has the same public key.
+    /// (Previously this returned the derived scalar, which `from_secret` then
+    /// hashed again, so every reloaded validator key had a different VRF
+    /// public key than the one in genesis and every block failed VRF checks.)
+    /// WARNING: Handle with care — this is secret key material.
     #[inline]
     #[must_use]
     pub fn secret_bytes(&self) -> [u8; 32] {
-        self.secret.to_bytes()
+        self.seed
     }
 
     /// Create keypair from raw 32-byte secret.
@@ -83,6 +93,7 @@ impl VrfKeypair {
         let public_bytes = public.compress().to_bytes();
 
         VrfKeypair {
+            seed: *secret_bytes,
             secret,
             public,
             public_bytes,
@@ -433,6 +444,15 @@ pub fn check_leader_eligibility_integer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_secret_bytes_roundtrip_preserves_public_key() {
+        let keypair = VrfKeypair::generate();
+        let restored = VrfKeypair::from_secret(&keypair.secret_bytes()).unwrap();
+        assert_eq!(keypair.public_key(), restored.public_key());
+        let proof = restored.prove(b"slot-42");
+        assert!(verify_proof(keypair.public_key(), b"slot-42", &proof).unwrap());
+    }
 
     #[test]
     fn test_vrf_generation() {

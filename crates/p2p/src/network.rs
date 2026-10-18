@@ -30,7 +30,7 @@ pub const TOPIC_SYNC: &str = "/aether/1/sync";
 /// each shard payload is ceil((2 MB + 8) / 10) ≈ 210 KB plus ~200 B of
 /// shred metadata, so 256 KB is the minimum safe limit.
 /// Blocks can be large but still bounded (2 MB via gossipsub max_transmit_size).
-const MAX_TX_SIZE: usize = 64 * 1024; // 64 KB
+const MAX_TX_SIZE: usize = 1024 * 1024; // 1 MB — transaction gossip is batched
 const MAX_BLOCK_SIZE: usize = 2 * 1024 * 1024; // 2 MB
 const MAX_VOTE_SIZE: usize = 8 * 1024; // 8 KB
 const MAX_SHRED_SIZE: usize = 256 * 1024; // 256 KB — RS(10,2) on 2 MB block ≈ 210 KB per shred
@@ -72,7 +72,9 @@ const BAN_DURATION_SECS: u64 = 3600;
 
 const MAX_BANNED_PEERS: usize = 4096;
 
-const RATE_LIMIT_TOKENS: u32 = 100;
+// Validators exchange blocks, votes, sync responses and batched tx gossip;
+// 100 msgs/s (the old limit) banned honest peers within seconds under load.
+const RATE_LIMIT_TOKENS: u32 = 2000;
 const RATE_LIMIT_REFILL_INTERVAL: Duration = Duration::from_secs(1);
 const RATE_LIMIT_PENALTY: i32 = -20;
 const MAX_RATE_LIMITERS: usize = 1024;

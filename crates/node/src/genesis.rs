@@ -23,6 +23,11 @@ pub struct GenesisConfig {
     /// Genesis timestamp (unix seconds).
     #[serde(default)]
     pub timestamp: u64,
+    /// Unix milliseconds at which slot 0 starts. All validators derive the
+    /// current slot as `(now_ms - genesis_time_ms) / slot_ms`, which keeps
+    /// independent processes on the same slot. 0 = use `timestamp * 1000`.
+    #[serde(default)]
+    pub genesis_time_ms: u64,
     /// Initial protocol version.
     #[serde(default = "default_protocol_version")]
     pub protocol_version: u32,
@@ -77,6 +82,7 @@ impl GenesisConfig {
             validators,
             accounts,
             timestamp: 0,
+            genesis_time_ms: 0,
             protocol_version: 1,
         }
     }
@@ -214,7 +220,19 @@ impl GenesisConfig {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
+            genesis_time_ms: 0,
             protocol_version: 1,
+        }
+    }
+
+    /// Unix-ms at which slot 0 starts (`genesis_time_ms`, else `timestamp`).
+    pub fn genesis_time_ms(&self) -> Option<u64> {
+        if self.genesis_time_ms > 0 {
+            Some(self.genesis_time_ms)
+        } else if self.timestamp > 0 {
+            Some(self.timestamp.saturating_mul(1000))
+        } else {
+            None
         }
     }
 
@@ -269,6 +287,7 @@ mod tests {
                 balance: 100_000_000,
             }],
             timestamp: 1700000000,
+            genesis_time_ms: 0,
             protocol_version: 1,
         }
     }

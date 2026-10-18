@@ -9,9 +9,16 @@
 //!   /data/genesis/validator-2.key
 //!   ...
 //!   /data/genesis/genesis.json
+//!
+//! Also funds `--dev-accounts` deterministic devnet accounts
+//! (`Keypair::devnet(i)`, publicly derivable; local networks only) and sets
+//! `genesis_time_ms` a few seconds in the future so every validator process
+//! derives the same slot from the wall clock.
 
+use aether_crypto_primitives::Keypair;
+use aether_node::genesis::GenesisAccount;
 use aether_node::{GenesisConfig, ValidatorKeypair};
-use aether_types::ChainConfig;
+use aether_types::{Address, ChainConfig};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
@@ -22,6 +29,9 @@ fn main() -> Result<()> {
     let mut output_dir = PathBuf::from(".");
     let mut stake_per_validator: u128 = 1_000_000;
     let mut network = "devnet".to_string();
+    let mut dev_accounts: u32 = 256;
+    let mut dev_balance: u128 = 1_000_000_000_000_000;
+    let mut genesis_delay_ms: u64 = 3_000;
 
     let mut i = 1;
     while i < args.len() {
@@ -42,6 +52,20 @@ fn main() -> Result<()> {
                 i += 1;
                 network = args[i].clone();
             }
+            "--dev-accounts" => {
+                i += 1;
+                dev_accounts = args[i].parse().context("invalid --dev-accounts value")?;
+            }
+            "--dev-balance" => {
+                i += 1;
+                dev_balance = args[i].parse().context("invalid --dev-balance value")?;
+            }
+            "--genesis-delay-ms" => {
+                i += 1;
+                genesis_delay_ms = args[i]
+                    .parse()
+                    .context("invalid --genesis-delay-ms value")?;
+            }
             "--help" | "-h" => {
                 eprintln!("Usage: genesis-ceremony [OPTIONS]");
                 eprintln!();
@@ -50,6 +74,13 @@ fn main() -> Result<()> {
                 eprintln!("  -o, --output-dir <DIR>  Output directory (default: .)");
                 eprintln!("  --stake <AMOUNT>        Stake per validator (default: 1000000)");
                 eprintln!("  --network <NAME>        Network preset: devnet|testnet|mainnet (default: devnet)");
+                eprintln!(
+                    "  --dev-accounts <N>      Fund N deterministic devnet accounts (default: 256)"
+                );
+                eprintln!("  --dev-balance <AMOUNT>  Balance per devnet account (default: 1e15)");
+                eprintln!(
+                    "  --genesis-delay-ms <MS> Slot 0 starts this long after now (default: 3000)"
+                );
                 std::process::exit(0);
             }
             other => {
@@ -88,7 +119,20 @@ fn main() -> Result<()> {
     }
 
     // Build genesis config
-    let genesis = GenesisConfig::from_keypairs(chain_config, &keypairs, stake_per_validator);
+    let mut genesis = GenesisConfig::from_keypairs(chain_config, &keypairs, stake_per_validator);
+    for index in 0..dev_accounts {
+        let kp = Keypair::devnet(index);
+        genesis.accounts.push(GenesisAccount {
+            address: Address::from(kp.to_address()),
+            balance: dev_balance,
+        });
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    genesis.genesis_time_ms = now_ms + genesis_delay_ms;
+    genesis.timestamp = genesis.genesis_time_ms / 1000;
     genesis
         .validate()
         .context("genesis config validation failed")?;

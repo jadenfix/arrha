@@ -36,6 +36,24 @@ impl Keypair {
         self.inner.sign(message)
     }
 
+    /// Deterministic, PUBLICLY KNOWN keypair number `index` for local devnets.
+    ///
+    /// The secret is `SHA-256("aether-devnet-account" || index_le)`, so anyone
+    /// can derive it: these accounts are only for local test networks (the
+    /// genesis ceremony funds them; the CLI and load generator sign with
+    /// them). Never fund them on a real network.
+    #[must_use]
+    pub fn devnet(index: u32) -> Self {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"aether-devnet-account");
+        hasher.update(index.to_le_bytes());
+        let seed: [u8; 32] = hasher.finalize().into();
+        Keypair {
+            inner: ed25519::Keypair::from_bytes(&seed).expect("32-byte seed is always valid"),
+        }
+    }
+
     #[must_use]
     pub fn to_address(&self) -> [u8; 20] {
         use sha2::{Digest, Sha256};
@@ -44,5 +62,22 @@ impl Keypair {
         let mut addr = [0u8; 20];
         addr.copy_from_slice(&hash[..20]);
         addr
+    }
+}
+
+#[cfg(test)]
+mod devnet_tests {
+    use super::Keypair;
+
+    #[test]
+    fn devnet_keys_are_deterministic_and_distinct() {
+        assert_eq!(
+            Keypair::devnet(0).public_key(),
+            Keypair::devnet(0).public_key()
+        );
+        assert_ne!(
+            Keypair::devnet(0).public_key(),
+            Keypair::devnet(1).public_key()
+        );
     }
 }

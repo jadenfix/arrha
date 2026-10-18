@@ -135,6 +135,10 @@ impl ConsensusEngine for SimpleConsensus {
         self.current_slot
     }
 
+    fn finalizes_on_execution(&self) -> bool {
+        true
+    }
+
     fn advance_slot(&mut self) {
         SimpleConsensus::advance_slot(self)
     }

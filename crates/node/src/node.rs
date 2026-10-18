@@ -2,7 +2,9 @@ use aether_consensus::slashing::{self as slash_verify, SlashProof, SlashType, Vo
 use aether_consensus::{ConsensusEngine, SlashingDetector};
 use aether_crypto_bls::BlsKeypair;
 use aether_crypto_primitives::Keypair;
-use aether_ledger::{EmissionSchedule, FeeMarket, Ledger};
+use aether_ledger::{
+    BlockContext, EmissionSchedule, FeeMarket, Ledger, PendingOverlay, SparseMerkleTree,
+};
 use aether_mempool::Mempool;
 use aether_p2p::network::NetworkEvent;
 use aether_program_staking::StakingState;
@@ -11,12 +13,13 @@ use aether_state_storage::{
     database::pruning, Storage, StorageBatch, CF_BLOCKS, CF_METADATA, CF_RECEIPTS, CF_STAKING,
 };
 use aether_types::{
-    Account, Address, Block, ChainConfig, PublicKey, Slot, Transaction, TransactionReceipt, Vote,
-    H256,
+    Account, Address, AggregatedVote, Block, ChainConfig, PublicKey, Slot, Transaction,
+    TransactionReceipt, Vote, H256,
 };
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -90,7 +93,94 @@ const MAX_BLOCK_GAS_LIMIT: u64 = 10_000_000;
 
 /// Minimum interval between serving sync block-range responses.
 /// Prevents a peer from flooding sync requests and consuming all outbound bandwidth.
-const SYNC_RESPONSE_COOLDOWN: Duration = Duration::from_secs(2);
+const SYNC_RESPONSE_COOLDOWN: Duration = Duration::from_secs(1);
+
+/// Minimum interval between our own catch-up (block range) requests.
+const CATCHUP_REQUEST_INTERVAL: Duration = Duration::from_millis(1000);
+
+/// Maximum transactions per gossip batch (keeps a batch well under the 1 MB
+/// tx-topic limit).
+const MAX_TX_GOSSIP_BATCH: usize = 1500;
+
+/// Metadata keys for finalized-chain bookkeeping that must survive restarts.
+const META_BASE_FEE: &[u8] = b"base_fee";
+const META_TIP_QC: &[u8] = b"finalized_tip_qc";
+
+/// Milliseconds since the Unix epoch.
+pub fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// A block that has been executed but is not final yet.
+///
+/// Its state lives in an in-memory overlay chained to its parent's overlay;
+/// nothing touches RocksDB until the block is finalized, so competing forks
+/// can be executed side by side and the losing branch is simply dropped.
+struct PendingBlock {
+    block: Block,
+    overlay: Arc<PendingOverlay>,
+    /// Merkle tree after this block (including fee distribution).
+    tree: SparseMerkleTree,
+    /// Receipts with block hash and slot filled in.
+    receipts: Vec<TransactionReceipt>,
+    /// Fee market state after this block.
+    fee_market: FeeMarket,
+}
+
+/// Output of executing a block on top of its parent.
+struct ExecutedBlock {
+    receipts: Vec<TransactionReceipt>,
+    overlay: PendingOverlay,
+    tree: SparseMerkleTree,
+    fee_market: FeeMarket,
+    /// State root after the block's transactions (before fee distribution);
+    /// this is what the block header commits to.
+    state_root: H256,
+    receipts_root: H256,
+}
+
+/// Wall-clock timestamps a node recorded for a block (for explorers and
+/// benchmark tooling; not consensus data).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BlockTimes {
+    pub seen_ms: u64,
+    pub finalized_ms: Option<u64>,
+}
+
+/// Optional JSON-lines event log (`AETHER_EVENT_LOG`), used to record devnet
+/// sessions: proposals, votes, quorum certificates and finality.
+struct EventLog {
+    out: std::io::BufWriter<std::fs::File>,
+    node: String,
+}
+
+impl EventLog {
+    fn emit(&mut self, mut event: serde_json::Value) {
+        if let Some(obj) = event.as_object_mut() {
+            obj.insert("t".into(), serde_json::json!(unix_millis()));
+            obj.insert("node".into(), serde_json::json!(self.node));
+        }
+        let _ = writeln!(self.out, "{event}");
+        let _ = self.out.flush();
+    }
+}
+
+fn short_hash(h: &H256) -> String {
+    h.as_bytes()[..4]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn short_addr(a: &Address) -> String {
+    a.as_bytes()[..4]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
 
 type LoadedBlocks = (
     BTreeMap<Slot, H256>,
@@ -162,6 +252,29 @@ pub struct Node {
     /// committed at a slot wins; competing blocks are kept in memory for vote/QC
     /// purposes but their state is not written to disk until the chain is replayed.
     committed_at_slot: HashMap<Slot, H256>,
+    /// Last slot whose slot logic ran (wall-clock mode).
+    last_processed_slot: Option<Slot>,
+    /// Executed but not yet finalized blocks, by hash.
+    pending: HashMap<H256, PendingBlock>,
+    /// Hash and slot of the newest finalized block (= the on-disk state).
+    finalized_hash: H256,
+    finalized_tip_slot: Slot,
+    /// QC certifying the finalized tip, persisted so the node can extend it
+    /// after a restart.
+    finalized_tip_qc: Option<AggregatedVote>,
+    /// Unix-ms of slot 0. When set, `tick_wallclock` derives the slot from the
+    /// clock so independent validator processes agree on the current slot.
+    genesis_time_ms: Option<u64>,
+    /// Never vote at or below this slot (set on startup so a restarted
+    /// validator cannot double-vote for slots it voted on before the crash).
+    vote_floor: Option<Slot>,
+    /// Transactions accepted locally and not yet gossiped.
+    tx_gossip_buf: Vec<Transaction>,
+    last_catchup_request: Option<Instant>,
+    block_times: HashMap<H256, BlockTimes>,
+    /// Blocks whose QC we already logged.
+    qc_logged: HashSet<H256>,
+    event_log: Option<EventLog>,
 }
 
 impl Node {
@@ -226,11 +339,36 @@ impl Node {
             );
         }
 
-        let fee_market = FeeMarket::new(
+        let mut fee_market = FeeMarket::new(
             chain_config.fees.a,
             chain_config.chain.block_bytes_max,
             chain_config.fees.min_base_fee,
         );
+        // The base fee is chain state (it decides proposer rewards), so it is
+        // restored from the finalized tip rather than reset on restart.
+        if let Ok(Some(bytes)) = ledger.storage().get(CF_METADATA, META_BASE_FEE) {
+            if bytes.len() == 16 {
+                let mut arr = [0u8; 16];
+                arr.copy_from_slice(&bytes);
+                fee_market.base_fee = u128::from_le_bytes(arr);
+            }
+        }
+        let finalized_tip_qc: Option<AggregatedVote> = ledger
+            .storage()
+            .get(CF_METADATA, META_TIP_QC)
+            .ok()
+            .flatten()
+            .and_then(|bytes| bincode::deserialize(&bytes).ok());
+        // Let consensus know the finalized tip (slot + certificate) so blocks
+        // extending it pass the safe-node check after a restart.
+        if let Some(tip_slot) = latest_block_slot {
+            if let Some(tip) = blocks_by_hash.get(&latest_block_hash) {
+                consensus.record_block(latest_block_hash, tip.header.parent_hash, tip_slot);
+            }
+            if let Some(qc) = finalized_tip_qc.as_ref() {
+                consensus.on_qc(qc);
+            }
+        }
         let emission_schedule = EmissionSchedule::new(
             chain_config.tokens.swr_initial_supply,
             chain_config.chain.slot_ms,
@@ -271,7 +409,99 @@ impl Node {
             snapshot_dir: None,
             last_voted_slot: None,
             committed_at_slot: HashMap::new(),
+            last_processed_slot: None,
+            pending: HashMap::new(),
+            finalized_hash: latest_block_hash,
+            finalized_tip_slot: latest_block_slot.unwrap_or(0),
+            finalized_tip_qc,
+            genesis_time_ms: None,
+            vote_floor: None,
+            tx_gossip_buf: Vec::new(),
+            last_catchup_request: None,
+            block_times: HashMap::new(),
+            qc_logged: HashSet::new(),
+            event_log: None,
         })
+    }
+
+    /// Enable the JSON-lines event log at `path` (appends).
+    pub fn set_event_log(&mut self, path: &Path) -> Result<()> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .with_context(|| format!("failed to open event log {}", path.display()))?;
+        let node = self
+            .validator_key
+            .as_ref()
+            .map(|k| {
+                let addr = Address::from(k.to_address());
+                short_addr(&addr)
+            })
+            .unwrap_or_else(|| "observer".to_string());
+        self.event_log = Some(EventLog {
+            out: std::io::BufWriter::new(file),
+            node,
+        });
+        Ok(())
+    }
+
+    fn emit(&mut self, event: serde_json::Value) {
+        if let Some(log) = self.event_log.as_mut() {
+            log.emit(event);
+        }
+    }
+
+    /// Install the WASM contract runtime used for deploy/call transactions.
+    pub fn set_contract_executor(&mut self, executor: Arc<dyn aether_ledger::ContractExecutor>) {
+        self.ledger.set_contract_executor(executor);
+    }
+
+    /// Derive slots from wall-clock time relative to `genesis_ms`.
+    pub fn set_genesis_time_ms(&mut self, genesis_ms: u64) {
+        self.genesis_time_ms = Some(genesis_ms);
+    }
+
+    /// Slot that the wall clock says it is (requires `set_genesis_time_ms`).
+    pub fn wallclock_slot(&self, now_ms: u64) -> Option<Slot> {
+        let genesis = self.genesis_time_ms?;
+        let slot_ms = self.chain_config.chain.slot_ms.max(1);
+        Some(now_ms.saturating_sub(genesis) / slot_ms)
+    }
+
+    /// Unix-ms at which `slot` starts.
+    pub fn slot_start_ms(&self, slot: Slot) -> Option<u64> {
+        let genesis = self.genesis_time_ms?;
+        Some(genesis.saturating_add(slot.saturating_mul(self.chain_config.chain.slot_ms)))
+    }
+
+    /// Advance to the wall-clock slot and run its slot logic exactly once.
+    /// Returns true if a new slot was processed.
+    pub fn tick_wallclock(&mut self, now_ms: u64) -> Result<bool> {
+        let Some(target) = self.wallclock_slot(now_ms) else {
+            self.tick()?;
+            return Ok(true);
+        };
+        if self.vote_floor.is_none() {
+            // First tick after (re)start: never vote at slots we may have
+            // voted on in a previous run.
+            self.vote_floor = Some(target);
+            self.last_voted_slot = Some(self.last_voted_slot.unwrap_or(0).max(target));
+        }
+        let current = self.consensus.current_slot();
+        if target < current || (target == current && self.slot_processed(current)) {
+            return Ok(false);
+        }
+        if target > current {
+            self.consensus.skip_to_slot(target);
+        }
+        self.process_slot()?;
+        self.last_processed_slot = Some(target);
+        Ok(true)
+    }
+
+    fn slot_processed(&self, slot: Slot) -> bool {
+        self.last_processed_slot == Some(slot)
     }
 
     /// Configure a directory where epoch snapshots are written for fast-sync.
@@ -455,8 +685,26 @@ impl Node {
     pub fn submit_transaction(&mut self, tx: Transaction) -> Result<H256> {
         let tx_hash = tx.hash();
         self.mempool.add_transaction(tx.clone())?;
-        self.broadcast(OutboundMessage::BroadcastTransaction(tx));
+        if self.broadcast_tx.is_some() {
+            // Batched: `flush_tx_gossip` publishes many transactions per
+            // gossip message (per-message gossip cannot sustain high rates).
+            self.tx_gossip_buf.push(tx);
+            if self.tx_gossip_buf.len() >= MAX_TX_GOSSIP_BATCH {
+                self.flush_tx_gossip();
+            }
+        } else {
+            self.broadcast(OutboundMessage::BroadcastTransaction(tx));
+        }
         Ok(tx_hash)
+    }
+
+    /// Publish buffered transactions to peers as one batch.
+    pub fn flush_tx_gossip(&mut self) {
+        while !self.tx_gossip_buf.is_empty() {
+            let take = self.tx_gossip_buf.len().min(MAX_TX_GOSSIP_BATCH);
+            let batch: Vec<Transaction> = self.tx_gossip_buf.drain(..take).collect();
+            self.broadcast(OutboundMessage::BroadcastTransactions(batch));
+        }
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -500,20 +748,15 @@ impl Node {
         }
         self.current_epoch = epoch;
 
-        // Check pacemaker timeout — if no quorum reached, advance to prevent deadlock
+        // Pacemaker bookkeeping. Slots advance on the wall clock (or the test
+        // harness), so a timeout only resets the local phase; an empty slot
+        // (no VRF-eligible leader) is normal and not an error.
         if self.consensus.is_timed_out() {
-            self.consecutive_timeouts += 1;
-            if self.consecutive_timeouts >= 100 {
-                tracing::error!(
-                    consecutive_timeouts = self.consecutive_timeouts,
-                    slot,
-                    "CIRCUIT BREAKER — possible network partition or all peers down"
-                );
-            }
-            tracing::warn!(
+            self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
+            tracing::debug!(
                 slot,
                 consecutive = self.consecutive_timeouts,
-                "Slot timeout — advancing via pacemaker"
+                "No quorum certificate this slot"
             );
             self.consensus.on_timeout();
         } else {
@@ -529,22 +772,26 @@ impl Node {
             "PoH tick"
         );
 
-        if let Some(ref keypair) = self.validator_key {
-            let pubkey = PublicKey::from_bytes(keypair.public_key());
+        // A node that is missing blocks (orphans buffered) would only build a
+        // stale fork, so it catches up first.
+        if self.orphan_count == 0 {
+            if let Some(ref keypair) = self.validator_key {
+                let pubkey = PublicKey::from_bytes(keypair.public_key());
 
-            if self.consensus.is_leader(slot, &pubkey) {
-                tracing::info!(slot, "Leader — producing block");
-                self.produce_block(slot)?;
-            } else {
-                tracing::debug!(slot, "Not leader — waiting for block");
+                if self.consensus.is_leader(slot, &pubkey) {
+                    tracing::info!(slot, "Leader — producing block");
+                    self.produce_block(slot)?;
+                } else {
+                    tracing::debug!(slot, "Not leader — waiting for block");
+                }
             }
         }
 
         // Check if any slot can be finalized
         self.check_finality();
 
-        // Drive state sync if we're behind the network.
-        self.drive_sync(slot);
+        // Ask peers for blocks if we are missing some.
+        self.drive_catchup(slot);
 
         // Evict old cached blocks/receipts to bound memory (Fix 10)
         self.evict_old_cache();
@@ -552,83 +799,51 @@ impl Node {
         Ok(())
     }
 
-    /// Drive the state sync protocol: detect if behind, request blocks,
-    /// apply buffered blocks in order, and handle stalls.
-    fn drive_sync(&mut self, current_slot: Slot) {
-        let my_latest = self.latest_block_slot.unwrap_or(0);
-        let _span = tracing::debug_span!(
-            "drive_sync",
-            current_slot,
-            my_latest,
-            lag = current_slot.saturating_sub(my_latest),
-        )
-        .entered();
-
-        // Check if we've stalled during an active sync.
-        if self.sync_manager.is_syncing() && self.sync_manager.check_stalled() {
-            tracing::warn!(
-                next_expected = self.sync_manager.next_expected(),
-                "Sync stalled — retrying"
-            );
-            NODE_METRICS.sync_stalls.inc();
-            self.sync_manager.retry_after_stall(current_slot);
-        }
-
-        // Check if sync is needed based on how far behind we are.
-        if self.sync_manager.check_sync_needed(my_latest, current_slot) {
-            NODE_METRICS.sync_active.set(1);
-            NODE_METRICS
-                .sync_slot_lag
-                .set((current_slot.saturating_sub(my_latest)) as i64);
-            // Set expected parent hash from our latest block for chain continuity.
-            if self.sync_manager.blocks_applied() == 0 {
-                if let Some(hash) = self.latest_block_hash_if_set() {
-                    self.sync_manager.set_expected_parent(hash);
-                }
-            }
-
-            // Request the next batch of blocks from peers.
-            if let Some((from, to)) = self.sync_manager.next_request() {
-                tracing::info!(from, to, "Requesting sync blocks from peers");
-                self.broadcast(OutboundMessage::RequestBlockRange {
-                    from_slot: from,
-                    to_slot: to,
-                });
-            }
-        } else {
-            NODE_METRICS.sync_active.set(0);
-            NODE_METRICS.sync_slot_lag.set(0);
-        }
-
-        // Apply any contiguous buffered blocks.
-        let ready = self.sync_manager.drain_ready();
-        let batch_len = ready.len();
-        for block in ready {
-            let slot = block.header.slot;
-            match self.on_block_received(block) {
-                Ok(()) => {
-                    self.sync_manager.record_applied();
-                    NODE_METRICS.sync_blocks_applied.inc();
-                }
-                Err(e) => tracing::warn!(slot, err = %e, "Failed to apply sync block"),
-            }
-        }
+    /// Request missing blocks from peers when we hold orphans (blocks whose
+    /// parent we do not have) or our chain is far behind the wall clock.
+    /// Peers answer by re-broadcasting the requested blocks; orphans are then
+    /// connected in `process_orphans`.
+    fn drive_catchup(&mut self, current_slot: Slot) {
+        let head_slot = self.latest_block_slot.unwrap_or(0);
+        let lagging = self.peer_count > 0 && current_slot > head_slot.saturating_add(8);
+        let behind = self.orphan_count > 0 || lagging;
+        NODE_METRICS.sync_active.set(i64::from(behind));
         NODE_METRICS
-            .sync_buffer_size
-            .set(self.sync_manager.buffer_len() as i64);
-        if batch_len > 0 {
-            if let Some((from, target)) = self.sync_manager.sync_range() {
-                tracing::info!(
-                    applied = batch_len,
-                    total_applied = self.sync_manager.blocks_applied(),
-                    next_expected = self.sync_manager.next_expected(),
-                    target_slot = target,
-                    from_slot = from,
-                    buffered = self.sync_manager.buffer_len(),
-                    "Sync progress"
-                );
-            }
+            .sync_slot_lag
+            .set(current_slot.saturating_sub(head_slot) as i64);
+        if !behind {
+            return;
         }
+        if self
+            .last_catchup_request
+            .is_some_and(|t| t.elapsed() < CATCHUP_REQUEST_INTERVAL)
+        {
+            return;
+        }
+        // Ask for everything after the newest block we know is on the
+        // certified chain (our finalized tip, or a certified pending block).
+        let certified_head = self
+            .pending
+            .iter()
+            .filter(|(hash, _)| self.consensus.qc_for(hash).is_some())
+            .map(|(_, p)| p.block.header.slot)
+            .max()
+            .unwrap_or(0);
+        let from = certified_head
+            .max(self.finalized_tip_slot)
+            .saturating_add(1);
+        let to = current_slot.max(from);
+        tracing::info!(
+            from,
+            to,
+            orphans = self.orphan_count,
+            "Requesting missing blocks from peers"
+        );
+        self.last_catchup_request = Some(Instant::now());
+        self.broadcast(OutboundMessage::RequestBlockRange {
+            from_slot: from,
+            to_slot: to,
+        });
     }
 
     /// Process epoch transition: distribute staking rewards.
@@ -760,14 +975,28 @@ impl Node {
 
     /// Evict oldest cached blocks/receipts to keep memory bounded.
     fn evict_old_cache(&mut self) {
-        // Evict blocks exceeding cache limit — O(log n) per eviction via BTreeMap
+        // Evict finalized blocks exceeding the cache limit (they stay on disk).
+        // Never evict the finalized tip or pending blocks.
         while self.blocks_by_hash.len() > MAX_CACHED_BLOCKS {
-            if let Some((&min_slot, &hash)) = self.blocks_by_slot.iter().next() {
-                self.blocks_by_slot.remove(&min_slot);
-                self.blocks_by_hash.remove(&hash);
-            } else {
-                break;
+            match self.blocks_by_slot.iter().next() {
+                Some((&min_slot, &hash)) if hash != self.finalized_hash => {
+                    self.blocks_by_slot.remove(&min_slot);
+                    self.blocks_by_hash.remove(&hash);
+                    self.block_times.remove(&hash);
+                }
+                _ => break,
             }
+        }
+        if self.block_times.len() > MAX_CACHED_BLOCKS {
+            let floor = self
+                .finalized_tip_slot
+                .saturating_sub(MAX_CACHED_BLOCKS as u64);
+            let blocks = &self.blocks_by_hash;
+            self.block_times
+                .retain(|h, _| blocks.get(h).is_some_and(|b| b.header.slot >= floor));
+        }
+        if self.qc_logged.len() > 4096 {
+            self.qc_logged.clear();
         }
 
         // Evict oldest receipts by slot (not random HashMap order)
@@ -800,191 +1029,330 @@ impl Node {
         self.prune_stale_orphans(finalized);
     }
 
-    fn produce_block(&mut self, slot: Slot) -> Result<()> {
-        let _span = tracing::info_span!("produce_block", slot).entered();
-        let block_start = Instant::now();
-
-        // Forced inclusion: include txs that have been waiting too long (anti-censorship)
-        let transactions = {
-            let _mempool_span = tracing::debug_span!("mempool_select", slot).entered();
-            let forced = self
-                .mempool
-                .must_include_transactions(slot, self.fee_market.base_fee);
-            let forced_count = forced.len();
-            let remaining_capacity = 1000usize.saturating_sub(forced_count);
-            let regular = self
-                .mempool
-                .get_transactions(remaining_capacity, MAX_BLOCK_GAS_LIMIT);
-            if forced_count > 0 {
-                tracing::info!(forced_count, "Forced inclusion txs");
-                let mut all = forced;
-                all.extend(regular);
-                all
-            } else {
-                regular
-            }
-        };
-
-        tracing::info!(tx_count = transactions.len(), "Including transactions");
-
-        // Get VRF proof FIRST (before execution, to fail fast if not leader)
-        let vrf_proof_crypto = self.consensus.get_leader_proof(slot);
-        let vrf_proof = if let Some(proof) = vrf_proof_crypto {
-            aether_types::VrfProof {
-                output: proof.output,
-                proof: proof.proof,
-            }
-        } else {
-            aether_types::VrfProof {
-                output: [0u8; 32],
-                proof: vec![],
-            }
-        };
-
-        // Apply transactions speculatively (NOT committed to disk yet)
-        let (receipts, overlay) = self.ledger.apply_block_speculatively_with_chain_id(
-            &transactions,
-            Some(self.chain_config.chain.chain_id_numeric),
-        )?;
-        let successful = receipts
-            .iter()
-            .filter(|r| matches!(r.status, aether_types::TransactionStatus::Success))
-            .count();
-
-        if !transactions.is_empty() {
-            tracing::info!(
-                successful,
-                failed = receipts.len() - successful,
-                "Speculative execution complete"
-            );
+    /// State after `parent_hash`: its overlay (None = finalized storage), its
+    /// Merkle tree and fee market. `None` if we cannot execute on top of it.
+    fn parent_state(
+        &self,
+        parent_hash: &H256,
+    ) -> Option<(Option<Arc<PendingOverlay>>, SparseMerkleTree, FeeMarket)> {
+        if *parent_hash == self.finalized_hash {
+            return Some((
+                None,
+                self.ledger.merkle_tree().clone(),
+                self.fee_market.clone(),
+            ));
         }
-
-        // Compute block header roots from speculative state
-        let (state_root, transactions_root, receipts_root) = {
-            let _roots_span =
-                tracing::debug_span!("compute_roots", tx_count = transactions.len()).entered();
+        self.pending.get(parent_hash).map(|p| {
             (
-                overlay.state_root,
-                compute_transactions_root(&transactions),
-                compute_receipts_root(&receipts),
+                Some(p.overlay.clone()),
+                p.tree.clone(),
+                p.fee_market.clone(),
             )
-        };
+        })
+    }
 
-        let key = self
-            .validator_key
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("validator_key required for block production"))?;
-        let proposer_bytes = key.to_address();
-        let proposer = aether_types::Address::from_slice(&proposer_bytes)
-            .map_err(|e| anyhow::anyhow!("invalid proposer address: {e}"))?;
-
-        let mut block = Block::new(
-            slot,
-            self.latest_block_hash,
-            proposer,
-            vrf_proof,
-            transactions.clone(),
-        );
-
-        block.header.state_root = state_root;
-        block.header.transactions_root = transactions_root;
-        block.header.receipts_root = receipts_root;
-
-        let block_hash = block.hash();
-        tracing::info!(?block_hash, %state_root, "Block produced");
-
-        // Validate our own block BEFORE committing state
-        {
-            let _validate_span = tracing::debug_span!("self_validate_block", slot).entered();
-            if let Err(e) = self.consensus.validate_block(&block) {
-                tracing::warn!(err = %e, "Self-produced block validation failed");
-                return Ok(());
-            }
+    fn block_slot(&self, hash: &H256) -> Option<Slot> {
+        if let Some(p) = self.pending.get(hash) {
+            return Some(p.block.header.slot);
         }
+        if *hash == self.finalized_hash {
+            return Some(self.finalized_tip_slot);
+        }
+        self.blocks_by_hash.get(hash).map(|b| b.header.slot)
+    }
 
-        // Build stored receipts (with block context) for both cache and disk
-        let stored_receipts: Vec<TransactionReceipt> = receipts
-            .iter()
-            .map(|r| {
-                let mut sr = r.clone();
-                sr.block_hash = block_hash;
-                sr.slot = slot;
-                sr
-            })
-            .collect();
-
-        // ATOMIC COMMIT: overlay state + block + receipts + fee distribution in one WriteBatch.
-        // Previously these were two separate write_batch calls; a crash between
-        // them could leave ledger state committed without the block record (or
-        // vice versa), corrupting the node on restart.
-        // Fee distribution is also folded in so proposer rewards are never lost if
-        // the process crashes after the overlay commit but before the credit write.
+    /// Execute `transactions` on top of `parent_hash` and apply fee
+    /// distribution for `proposer`.
+    fn execute_on_parent(
+        &self,
+        parent_hash: &H256,
+        proposer: &Address,
+        transactions: &[Transaction],
+        context: BlockContext,
+    ) -> Result<ExecutedBlock> {
+        let (parent_overlay, tree, mut fee_market) = self
+            .parent_state(parent_hash)
+            .ok_or_else(|| anyhow::anyhow!("parent state unavailable for {parent_hash:?}"))?;
+        let (receipts, mut overlay, mut tree) = self.ledger.apply_block_on(
+            parent_overlay,
+            tree,
+            transactions,
+            Some(self.chain_config.chain.chain_id_numeric),
+            context,
+        )?;
+        let state_root = overlay.state_root;
+        let receipts_root = compute_receipts_root(&receipts);
         let total_fees: u128 = transactions
             .iter()
             .fold(0u128, |acc, tx| acc.saturating_add(tx.fee));
         let gas_used: u64 = transactions
             .iter()
             .fold(0u64, |acc, tx| acc.saturating_add(tx.gas_limit));
-        let fee_result = self.fee_market.process_block(gas_used, total_fees);
-
-        let mut batch = self.ledger.prepare_overlay_batch(&overlay)?;
-        let block_batch = self.build_block_batch(&block, block_hash, &stored_receipts)?;
-        batch.extend(block_batch);
-        self.ledger.fold_fee_distribution_into_batch(
-            &mut batch,
-            &overlay,
-            &block.header.proposer,
+        let fee_result = fee_market.process_block(gas_used, total_fees);
+        self.ledger.apply_fee_distribution(
+            &mut overlay,
+            &mut tree,
+            proposer,
             fee_result.proposer_reward,
             fee_result.burned,
             fee_result.treasury_fee,
         )?;
-        // Record spent UTXOs for light-client audit and epoch-based pruning.
-        self.ledger.record_spent_utxos(&mut batch, &overlay, slot);
-        self.ledger.write_batch(batch)?;
-        STORAGE_METRICS.blocks_persisted.inc();
+        Ok(ExecutedBlock {
+            receipts,
+            overlay,
+            tree,
+            fee_market,
+            state_root,
+            receipts_root,
+        })
+    }
 
-        // Record block production metrics
+    /// Record an executed block as pending (not final).
+    fn insert_pending(&mut self, block: Block, block_hash: H256, executed: ExecutedBlock) {
+        let slot = block.header.slot;
+        let receipts: Vec<TransactionReceipt> = executed
+            .receipts
+            .into_iter()
+            .map(|mut r| {
+                r.block_hash = block_hash;
+                r.slot = slot;
+                r
+            })
+            .collect();
+
+        // Transactions stay in the mempool until their block is FINAL: this
+        // block may still lose to a fork, and leaders filter out transactions
+        // already included on the chain they extend (see `produce_block`).
+
+        if self.fork_choice.add_block(slot, block_hash) {
+            CONSENSUS_METRICS.fork_events.inc();
+        }
+        self.consensus
+            .record_block(block_hash, block.header.parent_hash, slot);
+        if self.latest_block_slot.is_none_or(|s| slot >= s) {
+            self.latest_block_slot = Some(slot);
+            self.latest_block_hash = block_hash;
+        }
+        self.block_times.entry(block_hash).or_insert(BlockTimes {
+            seen_ms: unix_millis(),
+            finalized_ms: None,
+        });
+        self.blocks_by_hash.insert(block_hash, block.clone());
+        self.pending.insert(
+            block_hash,
+            PendingBlock {
+                block,
+                overlay: Arc::new(executed.overlay),
+                tree: executed.tree,
+                receipts,
+                fee_market: executed.fee_market,
+            },
+        );
+    }
+
+    /// Block to build on: the highest certified block whose state we have.
+    fn choose_parent(&self) -> (H256, Slot) {
+        if let Some((hash, slot)) = self.consensus.high_qc() {
+            if slot >= self.finalized_tip_slot
+                && (hash == self.finalized_hash || self.pending.contains_key(&hash))
+            {
+                return (hash, slot);
+            }
+        }
+        let best_pending = self
+            .pending
+            .iter()
+            .filter(|(hash, _)| self.consensus.qc_for(hash).is_some())
+            .max_by_key(|(hash, p)| (p.block.header.slot, hash.0))
+            .map(|(hash, p)| (*hash, p.block.header.slot));
+        if let Some(best) = best_pending {
+            return best;
+        }
+        (self.finalized_hash, self.finalized_tip_slot)
+    }
+
+    /// QC certifying `hash`, from consensus or (for the finalized tip) disk.
+    fn qc_for_block(&self, hash: &H256) -> Option<AggregatedVote> {
+        self.consensus.qc_for(hash).or_else(|| {
+            if *hash == self.finalized_hash {
+                self.finalized_tip_qc.clone()
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Pick transactions for a block extending `parent_hash`: forced
+    /// inclusions first, then by fee; skip transactions already included in
+    /// a pending ancestor, keep each sender's nonces contiguous from the
+    /// parent state, and respect the block tx-count and gas limits.
+    fn select_transactions(&self, slot: Slot, parent_hash: &H256) -> Vec<Transaction> {
+        let _mempool_span = tracing::debug_span!("mempool_select", slot).entered();
+        const MAX_BLOCK_TXS: usize = 1000;
+
+        let mut included: HashSet<H256> = HashSet::new();
+        let mut hash = *parent_hash;
+        while let Some(p) = self.pending.get(&hash) {
+            included.extend(p.block.transactions.iter().map(|tx| tx.hash()));
+            hash = p.block.header.parent_hash;
+        }
+        let parent_overlay = self.pending.get(parent_hash).map(|p| p.overlay.clone());
+
+        let forced = self
+            .mempool
+            .must_include_transactions(slot, self.fee_market.base_fee);
+        // Non-destructive: transactions stay in the pool until finalized.
+        let regular = self
+            .mempool
+            .peek_transactions(MAX_BLOCK_TXS.saturating_mul(8));
+        let mut candidates = Vec::with_capacity(forced.len() + regular.len());
+        let mut seen: HashSet<H256> = HashSet::new();
+        for tx in forced.into_iter().chain(regular) {
+            let h = tx.hash();
+            if !included.contains(&h) && seen.insert(h) {
+                candidates.push(tx);
+            }
+        }
+        candidates.sort_by(|a, b| {
+            a.sender
+                .as_bytes()
+                .cmp(b.sender.as_bytes())
+                .then(a.nonce.cmp(&b.nonce))
+        });
+
+        let mut expected: HashMap<Address, u64> = HashMap::new();
+        let mut out = Vec::new();
+        let mut gas = 0u64;
+        for tx in candidates {
+            if out.len() >= MAX_BLOCK_TXS {
+                break;
+            }
+            let next_nonce = expected.entry(tx.sender).or_insert_with(|| {
+                self.ledger
+                    .account_in(parent_overlay.as_deref(), &tx.sender)
+                    .map(|a| a.nonce)
+                    .unwrap_or(0)
+            });
+            if tx.nonce != *next_nonce {
+                continue;
+            }
+            let next_gas = gas.saturating_add(tx.gas_limit);
+            if next_gas > MAX_BLOCK_GAS_LIMIT {
+                continue;
+            }
+            gas = next_gas;
+            *next_nonce += 1;
+            out.push(tx);
+        }
+        out
+    }
+
+    fn produce_block(&mut self, slot: Slot) -> Result<()> {
+        let _span = tracing::info_span!("produce_block", slot).entered();
+        let block_start = Instant::now();
+
+        // HotStuff: extend the highest certified block, carrying its QC.
+        let (parent_hash, parent_slot) = self.choose_parent();
+        if parent_slot >= slot && parent_hash != H256::zero() {
+            return Ok(());
+        }
+        let aggregated_vote = if parent_hash == H256::zero() {
+            None
+        } else {
+            match self.qc_for_block(&parent_hash) {
+                Some(qc) => Some(qc),
+                // Engines without a voting finality gadget have no QCs.
+                None if self.consensus.finalizes_on_execution() => None,
+                None => {
+                    tracing::debug!(slot, ?parent_hash, "No QC for parent — not proposing");
+                    return Ok(());
+                }
+            }
+        };
+
+        let transactions = self.select_transactions(slot, &parent_hash);
+
+        // Get VRF proof FIRST (before execution, to fail fast if not leader)
+        let vrf_proof = match self.consensus.get_leader_proof(slot) {
+            Some(proof) => aether_types::VrfProof {
+                output: proof.output,
+                proof: proof.proof,
+            },
+            None => aether_types::VrfProof {
+                output: [0u8; 32],
+                proof: vec![],
+            },
+        };
+
+        let key = self
+            .validator_key
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("validator_key required for block production"))?;
+        let proposer = Address::from(key.to_address());
+
+        let parent_timestamp = self
+            .blocks_by_hash
+            .get(&parent_hash)
+            .map(|b| b.header.timestamp)
+            .unwrap_or(0);
+        let timestamp = (unix_millis() / 1000).max(parent_timestamp);
+        let context = BlockContext { slot, timestamp };
+
+        let executed = self.execute_on_parent(&parent_hash, &proposer, &transactions, context)?;
+        let successful = executed
+            .receipts
+            .iter()
+            .filter(|r| matches!(r.status, aether_types::TransactionStatus::Success))
+            .count();
+
+        let mut block = Block::new(slot, parent_hash, proposer, vrf_proof, transactions);
+        block.header.timestamp = timestamp;
+        block.header.state_root = executed.state_root;
+        block.header.transactions_root = compute_transactions_root(&block.transactions);
+        block.header.receipts_root = executed.receipts_root;
+        block.aggregated_vote = aggregated_vote;
+
+        let block_hash = block.hash();
+
+        // Validate our own block (VRF eligibility, safe-node rule)
+        if let Err(e) = self.consensus.validate_block(&block) {
+            tracing::warn!(err = %e, "Self-produced block validation failed");
+            return Ok(());
+        }
+
+        tracing::info!(
+            ?block_hash,
+            parent_slot,
+            tx_count = block.transactions.len(),
+            successful,
+            "Block produced"
+        );
         CONSENSUS_METRICS.blocks_produced.inc();
         CONSENSUS_METRICS
             .transactions_processed
-            .inc_by(transactions.len() as u64);
+            .inc_by(block.transactions.len() as u64);
         CONSENSUS_METRICS
             .block_production_ms
             .observe(block_start.elapsed().as_secs_f64() * 1000.0);
 
-        for sr in &stored_receipts {
-            self.receipts.insert(sr.tx_hash, sr.clone());
+        self.emit(serde_json::json!({
+            "ev": "propose",
+            "slot": slot,
+            "hash": short_hash(&block_hash),
+            "parent": short_hash(&parent_hash),
+            "parent_slot": parent_slot,
+            "txs": block.transactions.len(),
+            "ok": successful,
+            "exec_ms": block_start.elapsed().as_millis() as u64,
+        }));
+
+        self.insert_pending(block.clone(), block_hash, executed);
+        if self.consensus.finalizes_on_execution() {
+            self.finalize_through(block_hash)?;
         }
 
-        self.fork_choice.add_block(slot, block_hash);
-        self.fork_choice.mark_committed(slot);
-        // Record that this slot's state is now durably committed — mirrors the
-        // guard in on_block_received that prevents a fork block from overwriting
-        // already-committed state and corrupting the UTXO set.
-        self.committed_at_slot.insert(slot, block_hash);
-        self.latest_block_hash = block_hash;
-        self.latest_block_slot = Some(slot);
-        self.blocks_by_slot.insert(slot, block_hash);
-        self.blocks_by_hash.insert(block_hash, block.clone());
-
-        // Record block parent for 2-chain finality tracking
-        self.consensus
-            .record_block(block_hash, block.header.parent_hash, slot);
-
-        // Remove transactions from mempool and update sender nonces so the
-        // mempool rejects replays of already-executed transactions — even ones
-        // that were never in this node's local pool.
-        let tx_hashes: Vec<H256> = transactions.iter().map(|tx| tx.hash()).collect();
-        self.mempool.remove_transactions(&tx_hashes);
-        for tx in &transactions {
-            self.mempool
-                .advance_sender_nonce(tx.sender, tx.nonce.saturating_add(1));
-        }
-
-        // Broadcast block to network
+        // Broadcast block to network, then vote for it.
         self.broadcast(OutboundMessage::BroadcastBlock(block.clone()));
-
-        // Vote on our own block
         self.vote_on_block(&block)?;
 
         Ok(())
@@ -1007,6 +1375,14 @@ impl Node {
                 );
                 return Ok(());
             }
+        }
+
+        if !self.consensus.safe_to_vote(block) {
+            tracing::debug!(
+                slot = block.header.slot,
+                "Not voting: block conflicts with our lock (safe-node rule)"
+            );
+            return Ok(());
         }
 
         let (validator_key, bls_key) = match (&self.validator_key, &self.bls_key) {
@@ -1060,6 +1436,13 @@ impl Node {
 
         self.broadcast(OutboundMessage::BroadcastVote(vote));
         self.last_voted_slot = Some(slot);
+        self.emit(serde_json::json!({
+            "ev": "vote",
+            "slot": slot,
+            "hash": short_hash(&block_hash),
+        }));
+        self.note_qc(&block_hash);
+        self.check_finality();
 
         Ok(())
     }
@@ -1069,21 +1452,26 @@ impl Node {
     // ========================================================================
 
     /// Handle a block received from the P2P network.
+    ///
+    /// The block is validated, executed on top of its parent's (possibly
+    /// pending) state and kept as a pending block. Its state reaches disk
+    /// only when it is finalized (see `check_finality`).
     pub fn on_block_received(&mut self, block: Block) -> Result<()> {
         let block_hash = block.hash();
         let _span =
             tracing::info_span!("on_block_received", slot = block.header.slot, ?block_hash,)
                 .entered();
 
-        // Reject if already known (also prevents fee market double-update)
-        if self.blocks_by_hash.contains_key(&block_hash) {
+        // Already known (pending, finalized or cached)
+        if self.pending.contains_key(&block_hash)
+            || block_hash == self.finalized_hash
+            || self.blocks_by_hash.contains_key(&block_hash)
+        {
             return Ok(());
         }
 
-        // Reject if slot is at or before finalized (except slot 0 edge case)
-        if block.header.slot <= self.consensus.finalized_slot()
-            && self.consensus.finalized_slot() > 0
-        {
+        // At or below the finalized tip: either already final or a dead fork.
+        if block.header.slot <= self.finalized_tip_slot && self.finalized_tip_slot > 0 {
             return Ok(());
         }
 
@@ -1096,25 +1484,34 @@ impl Node {
             );
         }
 
-        // Buffer as orphan if parent is unknown (skip for genesis-like blocks).
-        // We check this before full consensus validation because consensus checks
-        // (e.g. future-slot rejection) may fail for blocks received out of order
-        // during sync. These blocks will be fully validated when their parent arrives.
-        if block.header.slot > 0
-            && block.header.parent_hash != H256::zero()
-            && !self.blocks_by_hash.contains_key(&block.header.parent_hash)
-        {
+        let parent_hash = block.header.parent_hash;
+        // State we can execute on: the finalized tip or a pending block.
+        let parent_state_known =
+            parent_hash == self.finalized_hash || self.pending.contains_key(&parent_hash);
+        // Header we can validate against (also older finalized blocks).
+        let parent_header_known = parent_state_known
+            || parent_hash == H256::zero()
+            || self.blocks_by_hash.contains_key(&parent_hash);
+        if !parent_header_known {
+            // Orphan: buffer until its parent arrives (catch-up requests
+            // fetch missing ancestors).
             if self.orphan_count < MAX_ORPHAN_BLOCKS {
-                tracing::info!(
-                    slot = block.header.slot,
-                    parent = ?block.header.parent_hash,
-                    "Buffering orphan block (parent unknown)"
-                );
-                self.orphan_count += 1;
-                self.orphan_blocks
-                    .entry(block.header.parent_hash)
-                    .or_default()
-                    .push(block);
+                let already = self
+                    .orphan_blocks
+                    .get(&parent_hash)
+                    .is_some_and(|v| v.iter().any(|b| b.hash() == block_hash));
+                if !already {
+                    tracing::info!(
+                        slot = block.header.slot,
+                        parent = ?parent_hash,
+                        "Buffering orphan block (parent unknown)"
+                    );
+                    self.orphan_count += 1;
+                    self.orphan_blocks
+                        .entry(parent_hash)
+                        .or_default()
+                        .push(block);
+                }
             } else {
                 tracing::warn!(
                     slot = block.header.slot,
@@ -1124,15 +1521,18 @@ impl Node {
             return Ok(());
         }
 
+        let parent_slot = self.block_slot(&parent_hash).unwrap_or(0);
+        let parent_timestamp = self
+            .blocks_by_hash
+            .get(&parent_hash)
+            .map(|b| b.header.timestamp)
+            .unwrap_or(0);
+
         // Validate block timestamp before heavier checks:
-        // 1. Must not be more than MAX_CLOCK_DRIFT_SECS in the future (prevents proposer
-        //    from manufacturing far-future timestamps to manipulate time-based on-chain logic).
-        // 2. Must be ≥ parent block timestamp (monotonicity).
+        // 1. Must not be more than MAX_CLOCK_DRIFT_SECS in the future.
+        // 2. Must be >= parent block timestamp (monotonicity).
         if block.header.slot > 0 {
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+            let now_secs = unix_millis() / 1000;
             if block.header.timestamp > now_secs.saturating_add(MAX_CLOCK_DRIFT_SECS) {
                 bail!(
                     "block timestamp {} is too far in the future (now={}, max_drift={}s)",
@@ -1141,22 +1541,16 @@ impl Node {
                     MAX_CLOCK_DRIFT_SECS
                 );
             }
-            // Timestamp must not precede parent's timestamp.
-            if block.header.parent_hash != H256::zero() {
-                if let Some(parent_block) = self.blocks_by_hash.get(&block.header.parent_hash) {
-                    if block.header.timestamp < parent_block.header.timestamp {
-                        bail!(
-                            "block timestamp {} precedes parent timestamp {}",
-                            block.header.timestamp,
-                            parent_block.header.timestamp
-                        );
-                    }
-                }
+            if parent_hash != H256::zero() && block.header.timestamp < parent_timestamp {
+                bail!(
+                    "block timestamp {} precedes parent timestamp {}",
+                    block.header.timestamp,
+                    parent_timestamp
+                );
             }
         }
 
         // Reject oversized blocks before expensive validation.
-        // bincode::serialized_size is O(n) but avoids full serialization allocation.
         let block_size = bincode::serialized_size(&block).unwrap_or(u64::MAX);
         if block_size > self.chain_config.chain.block_bytes_max {
             bail!(
@@ -1168,10 +1562,6 @@ impl Node {
         }
 
         // Reject blocks containing duplicate transaction hashes.
-        // A malicious proposer could include the same tx twice; while the
-        // second would fail during execution (nonce/UTXO), rejecting early
-        // avoids wasting execution resources and prevents state-root
-        // divergence between nodes that process duplicates differently.
         if block.transactions.len() > 1 {
             let mut seen_tx_hashes = HashSet::with_capacity(block.transactions.len());
             for tx in &block.transactions {
@@ -1185,24 +1575,28 @@ impl Node {
             }
         }
 
-        // Validate block via consensus (VRF proof, locked block check)
-        self.consensus.validate_block(&block)?;
-
-        // Validate slot monotonicity: block slot must be strictly greater than parent's slot
-        if block.header.slot > 0 && block.header.parent_hash != H256::zero() {
-            if let Some(parent_block) = self.blocks_by_hash.get(&block.header.parent_hash) {
-                if block.header.slot <= parent_block.header.slot {
-                    bail!(
-                        "slot monotonicity violation: block slot {} <= parent slot {}",
-                        block.header.slot,
-                        parent_block.header.slot
-                    );
-                }
+        // Our slot clock may lag the proposer's by a few ms; catch up to the
+        // wall clock before checking the slot bound.
+        if let Some(wall) = self.wallclock_slot(unix_millis()) {
+            if wall > self.consensus.current_slot() {
+                self.consensus.skip_to_slot(wall);
             }
         }
+        // Leader proof and slot bounds. The voting lock is NOT applied here:
+        // during catch-up we must accept ancestors of certified blocks.
+        self.consensus.verify_proposal(&block)?;
 
-        // Validate transactions_root matches actual transactions (unconditional —
-        // empty blocks naturally produce H256::zero() so zero roots still pass)
+        // Slot monotonicity: block slot must be strictly greater than parent's slot
+        if block.header.slot > 0 && parent_hash != H256::zero() && block.header.slot <= parent_slot
+        {
+            bail!(
+                "slot monotonicity violation: block slot {} <= parent slot {}",
+                block.header.slot,
+                parent_slot
+            );
+        }
+
+        // Validate transactions_root matches actual transactions
         let computed_tx_root = compute_transactions_root(&block.transactions);
         if computed_tx_root != block.header.transactions_root {
             bail!(
@@ -1212,9 +1606,8 @@ impl Node {
             );
         }
 
-        // Non-genesis blocks MUST carry a quorum certificate (aggregated vote).
-        // Without this check, a malicious proposer could omit the QC entirely
-        // and bypass BLS quorum verification.
+        // Every block that does not extend genesis MUST carry a quorum
+        // certificate for its parent (HotStuff: proposals extend a QC).
         let is_genesis_or_bootstrap =
             block.header.slot <= 1 || block.header.parent_hash == H256::zero();
         if !is_genesis_or_bootstrap && block.aggregated_vote.is_none() {
@@ -1224,89 +1617,12 @@ impl Node {
             );
         }
 
-        // Verify BLS aggregate signature when present (proves quorum voted for parent)
+        // Verify the BLS aggregate signature (proves a quorum voted for parent)
         if let Some(ref agg_vote) = block.aggregated_vote {
-            let _bls_span = tracing::debug_span!(
-                "verify_bls_aggregate",
-                slot = block.header.slot,
-                signers = agg_vote.signers.len(),
-            )
-            .entered();
-            // The QC must reference this block's parent — it certifies that
-            // a supermajority voted for the parent, justifying this extension.
-            if !is_genesis_or_bootstrap && agg_vote.block_hash != block.header.parent_hash {
-                bail!(
-                    "aggregated vote references block {:?} but parent is {:?}",
-                    agg_vote.block_hash,
-                    block.header.parent_hash
-                );
-            }
-            if agg_vote.signers.is_empty() {
-                bail!("aggregated vote has no signers");
-            }
-            // Reject duplicate signers: without this check an attacker controlling a
-            // single validator could list it N times, inflating voted_stake to N*stake
-            // and bypassing the 2/3 quorum requirement. The BLS aggregate would still
-            // verify because agg(sig, sig, ...) = N*sig verifies against N*pk.
-            {
-                let mut seen = HashSet::with_capacity(agg_vote.signers.len());
-                for signer in &agg_vote.signers {
-                    if !seen.insert(signer.to_address()) {
-                        bail!(
-                            "duplicate signer {:?} in aggregated vote",
-                            signer.to_address()
-                        );
-                    }
-                }
-            }
-            // Reconstruct the vote message: block_hash || slot (same as vote_on_block)
-            let mut vote_msg = Vec::new();
-            vote_msg.extend_from_slice(agg_vote.block_hash.as_bytes());
-            vote_msg.extend_from_slice(&agg_vote.slot.to_le_bytes());
-
-            // Look up BLS public keys and compute voted stake from our local
-            // validator set. NEVER trust agg_vote.total_stake from the block —
-            // an attacker could set it to any value to bypass quorum checks.
-            let mut bls_pubkeys = Vec::with_capacity(agg_vote.signers.len());
-            let mut voted_stake: u128 = 0;
-            for signer in &agg_vote.signers {
-                let addr = signer.to_address();
-                let bls_pk = self.consensus.get_bls_pubkey(&addr).ok_or_else(|| {
-                    anyhow::anyhow!("no BLS pubkey registered for signer {:?}", addr)
-                })?;
-                bls_pubkeys.push(bls_pk);
-                voted_stake = voted_stake.saturating_add(self.consensus.validator_stake(&addr));
-            }
-            let agg_pk = aether_crypto_bls::aggregate_public_keys(&bls_pubkeys)
-                .map_err(|e| anyhow::anyhow!("failed to aggregate signer pubkeys: {e}"))?;
-
-            let valid = aether_crypto_bls::verify_aggregated(
-                &agg_pk,
-                &vote_msg,
-                &agg_vote.aggregated_signature,
-            )
-            .map_err(|e| anyhow::anyhow!("BLS aggregate verification error: {e}"))?;
-            if !valid {
-                bail!("invalid BLS aggregate signature in block");
-            }
-
-            // Verify quorum: locally-computed voted stake must be >= 2/3 of total.
-            // Use the overflow-safe has_quorum() which handles large u128 stakes
-            // via checked_mul — bare `total_stake * 2` would overflow for stakes
-            // near u128::MAX, making the check trivially pass.
-            let total_stake = self.consensus.total_stake();
-            if total_stake > 0 && !aether_consensus::has_quorum(voted_stake, total_stake) {
-                bail!(
-                    "insufficient quorum: voted stake {} < required 2/3 of {}",
-                    voted_stake,
-                    total_stake
-                );
-            }
+            self.verify_qc(agg_vote, &block, is_genesis_or_bootstrap, parent_slot)?;
         }
 
-        // Enforce block gas limit: total gas across all transactions must not exceed
-        // the protocol limit. Without this, a malicious proposer could stuff arbitrarily
-        // large blocks, causing receivers to OOM during speculative execution.
+        // Enforce block gas limit
         let block_gas: u64 = block
             .transactions
             .iter()
@@ -1320,282 +1636,66 @@ impl Node {
             );
         }
 
-        // Execute transactions SPECULATIVELY (not committed to disk yet)
-        // Use chain_id validation to reject cross-chain replay attacks
-        let (receipts, overlay) = self.ledger.apply_block_speculatively_with_chain_id(
-            &block.transactions,
-            Some(self.chain_config.chain.chain_id_numeric),
-        )?;
+        // The QC is valid: record it (may advance lock, high QC and finality).
+        if let Some(ref agg_vote) = block.aggregated_vote {
+            if agg_vote.block_hash == parent_hash {
+                self.consensus.on_qc(agg_vote);
+                self.note_qc(&parent_hash);
+            }
+        }
 
-        // Validate receipts_root matches recomputed receipts
-        let computed_receipts_root = compute_receipts_root(&receipts);
-        if computed_receipts_root != block.header.receipts_root {
+        // A valid block whose parent state we no longer have extends a branch
+        // that lost to finality (or genesis after the chain moved on).
+        if !parent_state_known {
+            tracing::debug!(
+                slot = block.header.slot,
+                "Ignoring block on a branch that conflicts with finality"
+            );
+            return Ok(());
+        }
+
+        // Execute on top of the parent's state (nothing written to disk)
+        let exec_start = Instant::now();
+        let context = BlockContext {
+            slot: block.header.slot,
+            timestamp: block.header.timestamp,
+        };
+        let executed = self.execute_on_parent(
+            &parent_hash,
+            &block.header.proposer,
+            &block.transactions,
+            context,
+        )?;
+        if executed.receipts_root != block.header.receipts_root {
             bail!(
                 "receipts_root mismatch: computed={}, block={}",
-                computed_receipts_root,
+                executed.receipts_root,
                 block.header.receipts_root
             );
         }
-
-        // Validate state root matches before committing (unconditional)
-        if overlay.state_root != block.header.state_root {
-            // Discard overlay — state is UNCHANGED (rollback!)
+        if executed.state_root != block.header.state_root {
             bail!(
-                "state root mismatch: computed={}, block={} — block rejected, state unchanged",
-                overlay.state_root,
+                "state root mismatch: computed={}, block={} — block rejected",
+                executed.state_root,
                 block.header.state_root
             );
         }
 
-        // Build stored receipts (with block context) for both cache and disk
-        let stored_receipts: Vec<TransactionReceipt> = receipts
-            .iter()
-            .map(|r| {
-                let mut sr = r.clone();
-                sr.block_hash = block_hash;
-                sr.slot = block.header.slot;
-                sr
-            })
-            .collect();
+        self.emit(serde_json::json!({
+            "ev": "block",
+            "slot": block.header.slot,
+            "hash": short_hash(&block_hash),
+            "parent": short_hash(&parent_hash),
+            "parent_slot": parent_slot,
+            "proposer": short_addr(&block.header.proposer),
+            "txs": block.transactions.len(),
+            "qc": block.aggregated_vote.as_ref().map(|q| q.signers.iter().map(|p| short_addr(&p.to_address())).collect::<Vec<_>>()),
+            "exec_ms": exec_start.elapsed().as_millis() as u64,
+        }));
 
-        // Fork choice BEFORE commit: only persist state for canonical blocks.
-        // This prevents orphaned state from non-canonical forks being committed.
-        let old_canonical = self.fork_choice.canonical_block(block.header.slot);
-        let is_fork = self.fork_choice.add_block(block.header.slot, block_hash);
-        let new_canonical = self.fork_choice.canonical_block(block.header.slot);
-
-        if is_fork {
-            CONSENSUS_METRICS.fork_events.inc();
-        }
-
-        let is_canonical = new_canonical == Some(block_hash);
-
-        // SAFETY: once a block has been durably written to storage at a given slot, we must
-        // NOT write a competing block's state on top of it.  Doing so would leave stale effects
-        // from the first-committed block (e.g. UTXOs it created but the new canonical did not
-        // spend) permanently in storage, silently corrupting the UTXO set.
-        //
-        // The first canonical block committed at a slot wins.  Any subsequent fork block that
-        // fork-choice would prefer (lower hash) is kept in memory for vote/QC purposes but its
-        // overlay is discarded.  The correct resolution is to wait for the chain to grow: when
-        // a descendant of the fork block arrives and becomes canonical, the state from the
-        // finalized ancestor path will be applied from a clean base.
-        let already_committed_at_slot = self
-            .committed_at_slot
-            .get(&block.header.slot)
-            .is_some_and(|&h| h != block_hash);
-
-        let should_commit = is_canonical && !already_committed_at_slot;
-
-        if already_committed_at_slot && is_canonical {
-            tracing::warn!(
-                slot = block.header.slot,
-                committed = ?self.committed_at_slot.get(&block.header.slot),
-                incoming = ?block_hash,
-                "Fork block would be canonical but a different block is already committed at this \
-                 slot — skipping state commit to prevent UTXO set corruption"
-            );
-        }
-
-        if should_commit {
-            let _commit_span = tracing::info_span!(
-                "atomic_block_commit",
-                slot = block.header.slot,
-                ?block_hash,
-                tx_count = block.transactions.len(),
-            )
-            .entered();
-            // ATOMIC COMMIT: overlay state + block + receipts + fee distribution in one WriteBatch.
-            // Fee distribution is folded in so proposer rewards are never lost if the process
-            // crashes after the overlay commit but before the credit write.
-            let total_fees: u128 = block
-                .transactions
-                .iter()
-                .fold(0u128, |acc, tx| acc.saturating_add(tx.fee));
-            let gas_used: u64 = block
-                .transactions
-                .iter()
-                .fold(0u64, |acc, tx| acc.saturating_add(tx.gas_limit));
-            let fee_result = self.fee_market.process_block(gas_used, total_fees);
-
-            let mut batch = self.ledger.prepare_overlay_batch(&overlay)?;
-            let block_batch = self.build_block_batch(&block, block_hash, &stored_receipts)?;
-            batch.extend(block_batch);
-            self.ledger.fold_fee_distribution_into_batch(
-                &mut batch,
-                &overlay,
-                &block.header.proposer,
-                fee_result.proposer_reward,
-                fee_result.burned,
-                fee_result.treasury_fee,
-            )?;
-            // Record spent UTXOs for light-client audit and epoch-based pruning.
-            self.ledger
-                .record_spent_utxos(&mut batch, &overlay, block.header.slot);
-
-            // Apply slash evidence BEFORE the atomic write so slashing effects are
-            // persisted in the same WriteBatch. This prevents a crash between block
-            // commit and slash application from losing slash effects.
-            for evidence in &block.slash_evidence {
-                let (v1, v2, etype) =
-                    match (&evidence.vote1, &evidence.vote2, &evidence.evidence_type) {
-                        (Some(v1), Some(v2), Some(etype)) => (v1, v2, etype),
-                        _ => {
-                            tracing::warn!(
-                                validator = ?evidence.validator,
-                                reason = %evidence.reason,
-                                "Slash skipped — missing proof votes/type"
-                            );
-                            continue;
-                        }
-                    };
-
-                let proof_type = match etype {
-                    aether_types::SlashEvidenceType::DoubleSign => SlashType::DoubleSign,
-                    aether_types::SlashEvidenceType::SurroundVote => SlashType::SurroundVote,
-                };
-                let proof = SlashProof {
-                    vote1: SlashVote {
-                        slot: v1.slot,
-                        block_hash: v1.block_hash,
-                        validator: v1.validator,
-                        validator_pubkey: v1.validator_pubkey.clone(),
-                        signature: v1.signature.clone(),
-                    },
-                    vote2: SlashVote {
-                        slot: v2.slot,
-                        block_hash: v2.block_hash,
-                        validator: v2.validator,
-                        validator_pubkey: v2.validator_pubkey.clone(),
-                        signature: v2.signature.clone(),
-                    },
-                    validator: evidence.validator,
-                    proof_type: proof_type.clone(),
-                };
-
-                if let Err(e) = slash_verify::verify_slash_proof(&proof) {
-                    tracing::warn!(
-                        validator = ?evidence.validator,
-                        reason = %evidence.reason,
-                        err = %e,
-                        "Slash rejected — proof verification failed"
-                    );
-                    continue;
-                }
-
-                // Dedup: skip if already slashed by vote-time detection for this
-                // (validator, slot) pair, preventing double-slash of the same offense.
-                let offense_slot = v1.slot;
-                let offense_key = (evidence.validator, offense_slot);
-                if !self.slashed_offenses.insert(offense_key) {
-                    tracing::debug!(
-                        validator = ?evidence.validator,
-                        slot = offense_slot,
-                        reason = %evidence.reason,
-                        "Slash already applied for this (validator, slot) — skipping block evidence"
-                    );
-                    continue;
-                }
-
-                let rate_bps = slash_verify::slash_rate_bps(&proof.proof_type);
-
-                self.consensus
-                    .slash_validator(&evidence.validator, u128::from(rate_bps));
-
-                match self.staking_state.slash(
-                    evidence.validator,
-                    u128::from(rate_bps),
-                    block.header.slot,
-                ) {
-                    Ok(slashed) => tracing::warn!(
-                        validator = ?evidence.validator,
-                        rate_bps,
-                        slashed,
-                        reason = %evidence.reason,
-                        "Slash applied (block evidence)"
-                    ),
-                    Err(e) => tracing::warn!(
-                        validator = ?evidence.validator,
-                        reason = %evidence.reason,
-                        err = %e,
-                        "Slash skipped (block evidence)"
-                    ),
-                }
-            }
-
-            // Include staking state in the atomic batch so slash effects, validator
-            // registrations, and unbonding changes survive node restarts.
-            self.persist_staking_state_to_batch(&mut batch)?;
-
-            self.ledger.write_batch(batch)?;
-            // Record that this block's state is now durably committed at this slot.
-            self.committed_at_slot.insert(block.header.slot, block_hash);
-
-            // Lock this slot against future fork-choice reorgs — state is now
-            // committed and we have no rollback mechanism.
-            self.fork_choice.mark_committed(block.header.slot);
-        } else {
-            tracing::info!(
-                block_hash = %block_hash,
-                slot = block.header.slot,
-                canonical = ?new_canonical,
-                "Non-canonical fork block — state NOT committed"
-            );
-        }
-
-        if is_fork {
-            tracing::warn!(
-                slot = block.header.slot,
-                "Fork detected — multiple blocks at same slot"
-            );
-
-            // If canonical choice changed, reorg mempool nonces for affected senders
-            if old_canonical != new_canonical {
-                if let Some(old_hash) = old_canonical {
-                    if let Some(old_block) = self.blocks_by_hash.get(&old_hash) {
-                        let reverted_txs = old_block.transactions.clone();
-                        let mut new_nonces = std::collections::HashMap::new();
-                        for tx in &block.transactions {
-                            new_nonces
-                                .entry(tx.sender)
-                                .and_modify(|n: &mut u64| *n = (*n).max(tx.nonce.saturating_add(1)))
-                                .or_insert(tx.nonce.saturating_add(1));
-                        }
-                        self.mempool.reorg(reverted_txs, new_nonces);
-                    }
-                }
-            }
-        }
-
-        // Store block in hash map (all blocks, including non-canonical)
-        self.blocks_by_hash.insert(block_hash, block.clone());
-
-        // Only update slot->hash map and tip for blocks whose state was actually committed.
-        // If a fork block is preferred by fork-choice but we skipped its commit (to prevent
-        // UTXO-set corruption from double-committing at the same slot), keep the previously
-        // committed block as the chain tip — building on an uncommitted state would produce
-        // blocks with an incorrect state_root.
-        if should_commit {
-            self.blocks_by_slot.insert(block.header.slot, block_hash);
-            self.latest_block_hash = block_hash;
-            self.latest_block_slot = Some(block.header.slot);
-        }
-
-        // Record block parent for 2-chain finality tracking
-        self.consensus
-            .record_block(block_hash, block.header.parent_hash, block.header.slot);
-
-        for sr in &stored_receipts {
-            self.receipts.insert(sr.tx_hash, sr.clone());
-        }
-
-        // Remove included txs from mempool and advance sender nonces so the
-        // mempool rejects replays of transactions included in received blocks.
-        let tx_hashes: Vec<H256> = block.transactions.iter().map(|tx| tx.hash()).collect();
-        self.mempool.remove_transactions(&tx_hashes);
-        for tx in &block.transactions {
-            self.mempool
-                .advance_sender_nonce(tx.sender, tx.nonce.saturating_add(1));
+        self.insert_pending(block.clone(), block_hash, executed);
+        if self.consensus.finalizes_on_execution() {
+            self.finalize_through(block_hash)?;
         }
 
         // Vote on this block (if we're a validator)
@@ -1604,13 +1704,114 @@ impl Node {
         // Try to apply any orphan blocks that were waiting for this block as parent.
         self.process_orphans(block_hash);
 
-        // Update sync state based on network tip vs local tip
-        if let Some(local_slot) = self.latest_block_slot {
-            self.sync_manager
-                .check_sync_needed(local_slot, block.header.slot);
-        }
-
+        self.check_finality();
         Ok(())
+    }
+
+    /// Verify a block's embedded QC: it must certify the parent, list each
+    /// signer once, carry a valid BLS aggregate and reach a 2/3 stake quorum
+    /// computed from our own validator set.
+    fn verify_qc(
+        &self,
+        agg_vote: &AggregatedVote,
+        block: &Block,
+        is_genesis_or_bootstrap: bool,
+        parent_slot: Slot,
+    ) -> Result<()> {
+        let _bls_span = tracing::debug_span!(
+            "verify_bls_aggregate",
+            slot = block.header.slot,
+            signers = agg_vote.signers.len(),
+        )
+        .entered();
+        if !is_genesis_or_bootstrap {
+            if agg_vote.block_hash != block.header.parent_hash {
+                bail!(
+                    "aggregated vote references block {:?} but parent is {:?}",
+                    agg_vote.block_hash,
+                    block.header.parent_hash
+                );
+            }
+            if agg_vote.slot != parent_slot {
+                bail!(
+                    "aggregated vote slot {} does not match parent slot {}",
+                    agg_vote.slot,
+                    parent_slot
+                );
+            }
+        }
+        if agg_vote.signers.is_empty() {
+            bail!("aggregated vote has no signers");
+        }
+        // Reject duplicate signers: listing one validator N times would
+        // inflate the voted stake while the BLS aggregate still verifies.
+        let mut seen = HashSet::with_capacity(agg_vote.signers.len());
+        for signer in &agg_vote.signers {
+            if !seen.insert(signer.to_address()) {
+                bail!(
+                    "duplicate signer {:?} in aggregated vote",
+                    signer.to_address()
+                );
+            }
+        }
+        // Vote message: block_hash || slot (same as vote_on_block)
+        let mut vote_msg = Vec::new();
+        vote_msg.extend_from_slice(agg_vote.block_hash.as_bytes());
+        vote_msg.extend_from_slice(&agg_vote.slot.to_le_bytes());
+
+        // Never trust agg_vote.total_stake: recompute from our validator set.
+        let mut bls_pubkeys = Vec::with_capacity(agg_vote.signers.len());
+        let mut voted_stake: u128 = 0;
+        for signer in &agg_vote.signers {
+            let addr = signer.to_address();
+            let bls_pk = self
+                .consensus
+                .get_bls_pubkey(&addr)
+                .ok_or_else(|| anyhow::anyhow!("no BLS pubkey registered for signer {:?}", addr))?;
+            bls_pubkeys.push(bls_pk);
+            voted_stake = voted_stake.saturating_add(self.consensus.validator_stake(&addr));
+        }
+        let agg_pk = aether_crypto_bls::aggregate_public_keys(&bls_pubkeys)
+            .map_err(|e| anyhow::anyhow!("failed to aggregate signer pubkeys: {e}"))?;
+        let valid = aether_crypto_bls::verify_aggregated(
+            &agg_pk,
+            &vote_msg,
+            &agg_vote.aggregated_signature,
+        )
+        .map_err(|e| anyhow::anyhow!("BLS aggregate verification error: {e}"))?;
+        if !valid {
+            bail!("invalid BLS aggregate signature in block");
+        }
+        let total_stake = self.consensus.total_stake();
+        if total_stake > 0 && !aether_consensus::has_quorum(voted_stake, total_stake) {
+            bail!(
+                "insufficient quorum: voted stake {} < required 2/3 of {}",
+                voted_stake,
+                total_stake
+            );
+        }
+        Ok(())
+    }
+
+    /// Emit a `qc` event the first time we learn that `hash` is certified.
+    fn note_qc(&mut self, hash: &H256) {
+        if self.event_log.is_none() || self.qc_logged.contains(hash) {
+            return;
+        }
+        if let Some(qc) = self.consensus.qc_for(hash) {
+            self.qc_logged.insert(*hash);
+            let signers: Vec<String> = qc
+                .signers
+                .iter()
+                .map(|p| short_addr(&p.to_address()))
+                .collect();
+            self.emit(serde_json::json!({
+                "ev": "qc",
+                "slot": qc.slot,
+                "hash": short_hash(hash),
+                "signers": signers,
+            }));
+        }
     }
 
     /// Recursively process orphan blocks whose parent has just been applied.
@@ -1630,7 +1831,7 @@ impl Node {
 
     /// Returns whether the node is currently syncing.
     pub fn is_syncing(&self) -> bool {
-        self.sync_manager.is_syncing()
+        self.orphan_count > 0 || self.sync_manager.is_syncing()
     }
 
     /// Returns the number of connected peers.
@@ -1748,7 +1949,9 @@ impl Node {
             }
         }
 
+        let block_hash = vote.block_hash;
         self.consensus.add_vote(vote)?;
+        self.note_qc(&block_hash);
         self.check_finality();
         Ok(())
     }
@@ -1769,13 +1972,14 @@ impl Node {
                 )
                 .entered();
                 CONSENSUS_METRICS.blocks_received.inc();
-                if self.sync_manager.is_syncing() {
-                    let slot = block.header.slot;
-                    if !self.sync_manager.buffer_block(block) {
-                        tracing::warn!(slot, "Sync buffer full, dropping block");
-                    }
-                } else if let Err(e) = self.on_block_received(block) {
+                let slot = block.header.slot;
+                if let Err(e) = self.on_block_received(block) {
                     tracing::debug!(err = %e, "Block rejected");
+                    self.emit(serde_json::json!({
+                        "ev": "reject",
+                        "slot": slot,
+                        "reason": e.to_string(),
+                    }));
                 }
             }
             Some(NodeMessage::VoteReceived(vote)) => {
@@ -1784,6 +1988,14 @@ impl Node {
                         .entered();
                 if let Err(e) = self.on_vote_received(vote) {
                     tracing::debug!(err = %e, "Vote rejected");
+                }
+            }
+            Some(NodeMessage::TransactionsReceived(txs)) => {
+                let _msg_span = tracing::debug_span!("msg_txs", count = txs.len()).entered();
+                for tx in txs {
+                    if let Err(e) = self.mempool.add_transaction(tx) {
+                        tracing::trace!(err = %e, "Gossiped tx rejected");
+                    }
                 }
             }
             Some(NodeMessage::TransactionReceived(tx)) => {
@@ -1852,53 +2064,305 @@ impl Node {
         let last_finalized = self.consensus.finalized_slot();
         let _span = tracing::debug_span!("check_finality", current_slot, last_finalized,).entered();
 
-        // Only check slots we haven't checked yet (avoid O(n) scan on restart)
-        let start = if last_finalized > 0 {
-            last_finalized
-        } else {
-            0
-        };
-
-        // Limit to checking at most 100 slots per tick to prevent CPU spikes
-        let end = current_slot.min(start + 100);
-
-        for slot in start..=end {
+        // Let engines that finalize lazily (e.g. SimpleConsensus) evaluate
+        // recent slots; bounded to avoid CPU spikes after long gaps.
+        let end = current_slot.min(last_finalized.saturating_add(100));
+        for slot in last_finalized..=end {
             if self.consensus.check_finality(slot) {
                 CONSENSUS_METRICS.slots_finalized.inc();
+            }
+        }
 
-                tracing::info!(slot, "Slot finalized via VRF+HotStuff+BLS");
+        let finalized_slot = self.consensus.finalized_slot();
+        let target = match self.consensus.finalized_block() {
+            Some(hash) => Some(hash),
+            // Engines that only report a slot: map it onto our head chain,
+            // but only once it moves past what we already persisted (slot 0
+            // with nothing finalized must not finalize a slot-0 proposal).
+            None if finalized_slot > self.finalized_tip_slot => {
+                self.pending_on_head_chain_at(finalized_slot)
+            }
+            None => None,
+        };
+        let Some(target) = target else {
+            return;
+        };
+        if !self.pending.contains_key(&target) {
+            // Finalized block not executed here yet (we are catching up).
+            return;
+        }
+        if let Err(e) = self.finalize_through(target) {
+            tracing::error!(err = %e, "failed to persist finalized blocks");
+        }
+    }
 
-                // Update epoch randomness and measure finality latency from the
-                // finalized block.
-                if let Some(block) = self.get_block_by_slot(slot) {
-                    // Finality latency: wall-clock time since the block was produced.
-                    let now_secs = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    let latency_ms = now_secs
-                        .saturating_sub(block.header.timestamp)
-                        .saturating_mul(1000);
-                    CONSENSUS_METRICS
-                        .finality_latency_ms
-                        .observe(latency_ms as f64);
+    /// For engines without block-level finality: the pending block at `slot`
+    /// on the chain we would extend.
+    fn pending_on_head_chain_at(&self, slot: Slot) -> Option<H256> {
+        let (mut hash, _) = self.choose_parent();
+        if !self.pending.contains_key(&hash) {
+            // Fall back to the newest pending block.
+            hash = self
+                .pending
+                .iter()
+                .max_by_key(|(h, p)| (p.block.header.slot, h.0))
+                .map(|(h, _)| *h)?;
+        }
+        let mut found = None;
+        while let Some(p) = self.pending.get(&hash) {
+            if p.block.header.slot <= slot {
+                found = Some(hash);
+                break;
+            }
+            hash = p.block.header.parent_hash;
+        }
+        found
+    }
 
-                    if block.header.vrf_proof.output != [0u8; 32] {
-                        self.consensus
-                            .update_epoch_randomness(&block.header.vrf_proof.output);
-                    }
+    /// Persist every pending block from the current finalized tip up to and
+    /// including `target`, then drop pending blocks that conflict with it.
+    fn finalize_through(&mut self, target: H256) -> Result<()> {
+        let mut path = Vec::new();
+        let mut hash = target;
+        while hash != self.finalized_hash {
+            let Some(p) = self.pending.get(&hash) else {
+                // Missing ancestor: wait until catch-up delivers it.
+                return Ok(());
+            };
+            path.push(hash);
+            hash = p.block.header.parent_hash;
+            if path.len() > MAX_CACHED_BLOCKS {
+                bail!("finalized path longer than {MAX_CACHED_BLOCKS} blocks");
+            }
+        }
+        path.reverse();
+        for hash in path {
+            self.commit_finalized(hash)?;
+        }
+        self.prune_pending();
+        Ok(())
+    }
+
+    /// Write one finalized block (state delta, block, receipts, fee market,
+    /// QC, staking/slashing effects) to storage in a single atomic batch.
+    fn commit_finalized(&mut self, block_hash: H256) -> Result<()> {
+        let Some(pb) = self.pending.remove(&block_hash) else {
+            return Ok(());
+        };
+        let slot = pb.block.header.slot;
+        let _commit_span = tracing::info_span!(
+            "atomic_block_commit",
+            slot,
+            ?block_hash,
+            tx_count = pb.block.transactions.len(),
+        )
+        .entered();
+
+        let mut extra = self.build_block_batch(&pb.block, block_hash, &pb.receipts)?;
+        self.ledger
+            .record_spent_utxos(&mut extra, &pb.overlay, slot);
+        extra.put(
+            CF_METADATA,
+            META_BASE_FEE.to_vec(),
+            pb.fee_market.base_fee.to_le_bytes().to_vec(),
+        );
+        let qc = self.consensus.qc_for(&block_hash);
+        if let Some(ref qc) = qc {
+            extra.put(CF_METADATA, META_TIP_QC.to_vec(), bincode::serialize(qc)?);
+        }
+        self.apply_slash_evidence(&pb.block);
+        // Staking state (slashes, unbonding) is persisted with the block.
+        self.persist_staking_state_to_batch(&mut extra)?;
+
+        self.ledger.commit_pending(&pb.overlay, &pb.tree, extra)?;
+        STORAGE_METRICS.blocks_persisted.inc();
+
+        // Children now read this block's effects from storage.
+        for child in self.pending.values() {
+            if child.block.header.parent_hash == block_hash {
+                child.overlay.detach_parent();
+            }
+        }
+
+        self.fee_market = pb.fee_market;
+        self.finalized_hash = block_hash;
+        self.finalized_tip_slot = slot;
+        if qc.is_some() {
+            self.finalized_tip_qc = qc;
+        }
+        self.committed_at_slot.insert(slot, block_hash);
+        self.blocks_by_slot.insert(slot, block_hash);
+        self.blocks_by_hash.insert(block_hash, pb.block.clone());
+        for receipt in pb.receipts {
+            self.receipts.insert(receipt.tx_hash, receipt);
+        }
+        // Final: drop the block's transactions from the mempool for good.
+        let tx_hashes: Vec<H256> = pb.block.transactions.iter().map(|tx| tx.hash()).collect();
+        self.mempool.remove_transactions(&tx_hashes);
+        for tx in &pb.block.transactions {
+            self.mempool
+                .advance_sender_nonce(tx.sender, tx.nonce.saturating_add(1));
+        }
+        if !self.fork_choice.finalize(slot, block_hash) {
+            tracing::debug!(slot, "fork_choice: finalized block was not tracked");
+        }
+
+        let now = unix_millis();
+        let times = self.block_times.entry(block_hash).or_insert(BlockTimes {
+            seen_ms: now,
+            finalized_ms: None,
+        });
+        times.finalized_ms = Some(now);
+        let latency_ms = self
+            .slot_start_ms(slot)
+            .map(|start| now.saturating_sub(start))
+            .unwrap_or_else(|| now.saturating_sub(pb.block.header.timestamp.saturating_mul(1000)));
+        CONSENSUS_METRICS
+            .finality_latency_ms
+            .observe(latency_ms as f64);
+        tracing::info!(slot, ?block_hash, latency_ms, "Block finalized");
+        self.emit(serde_json::json!({
+            "ev": "final",
+            "slot": slot,
+            "hash": short_hash(&block_hash),
+            "txs": pb.block.transactions.len(),
+        }));
+        Ok(())
+    }
+
+    /// Drop pending blocks that do not descend from the finalized tip.
+    fn prune_pending(&mut self) {
+        let mut keep: HashSet<H256> = HashSet::new();
+        let mut drop: Vec<H256> = Vec::new();
+        let hashes: Vec<H256> = self.pending.keys().copied().collect();
+        for start in hashes {
+            let mut chain = Vec::new();
+            let mut hash = start;
+            let descends = loop {
+                if hash == self.finalized_hash || keep.contains(&hash) {
+                    break true;
                 }
-
-                // Finalize in fork choice
-                if let Some(&hash) = self.blocks_by_slot.get(&slot) {
-                    if !self.fork_choice.finalize(slot, hash) {
-                        tracing::warn!(
-                            slot,
-                            ?hash,
-                            "fork_choice: could not finalize unknown block"
-                        );
+                match self.pending.get(&hash) {
+                    Some(p) if p.block.header.slot > self.finalized_tip_slot => {
+                        chain.push(hash);
+                        hash = p.block.header.parent_hash;
                     }
+                    _ => break false,
                 }
+            };
+            if descends {
+                keep.extend(chain);
+            } else {
+                drop.push(start);
+            }
+        }
+        if drop.is_empty() {
+            return;
+        }
+        let mut orphaned_txs = 0usize;
+        for hash in &drop {
+            if let Some(p) = self.pending.remove(hash) {
+                orphaned_txs += p.block.transactions.len();
+            }
+            self.blocks_by_hash.remove(hash);
+            self.block_times.remove(hash);
+        }
+        tracing::info!(
+            dropped_blocks = drop.len(),
+            txs_back_to_mempool = orphaned_txs,
+            "Pruned pending blocks that conflict with finality"
+        );
+        self.emit(serde_json::json!({
+            "ev": "prune",
+            "blocks": drop.iter().map(short_hash).collect::<Vec<_>>(),
+        }));
+        // Their transactions never left the mempool (only finalization
+        // removes them), so they are simply eligible again.
+    }
+
+    /// Apply slash evidence carried by a finalized block.
+    fn apply_slash_evidence(&mut self, block: &Block) {
+        for evidence in &block.slash_evidence {
+            let (v1, v2, etype) = match (&evidence.vote1, &evidence.vote2, &evidence.evidence_type)
+            {
+                (Some(v1), Some(v2), Some(etype)) => (v1, v2, etype),
+                _ => {
+                    tracing::warn!(
+                        validator = ?evidence.validator,
+                        reason = %evidence.reason,
+                        "Slash skipped — missing proof votes/type"
+                    );
+                    continue;
+                }
+            };
+
+            let proof_type = match etype {
+                aether_types::SlashEvidenceType::DoubleSign => SlashType::DoubleSign,
+                aether_types::SlashEvidenceType::SurroundVote => SlashType::SurroundVote,
+            };
+            let proof = SlashProof {
+                vote1: SlashVote {
+                    slot: v1.slot,
+                    block_hash: v1.block_hash,
+                    validator: v1.validator,
+                    validator_pubkey: v1.validator_pubkey.clone(),
+                    signature: v1.signature.clone(),
+                },
+                vote2: SlashVote {
+                    slot: v2.slot,
+                    block_hash: v2.block_hash,
+                    validator: v2.validator,
+                    validator_pubkey: v2.validator_pubkey.clone(),
+                    signature: v2.signature.clone(),
+                },
+                validator: evidence.validator,
+                proof_type: proof_type.clone(),
+            };
+
+            if let Err(e) = slash_verify::verify_slash_proof(&proof) {
+                tracing::warn!(
+                    validator = ?evidence.validator,
+                    reason = %evidence.reason,
+                    err = %e,
+                    "Slash rejected — proof verification failed"
+                );
+                continue;
+            }
+
+            // Dedup: skip if already slashed by vote-time detection for this
+            // (validator, slot) pair, preventing double-slash of the same offense.
+            let offense_key = (evidence.validator, v1.slot);
+            if !self.slashed_offenses.insert(offense_key) {
+                tracing::debug!(
+                    validator = ?evidence.validator,
+                    slot = v1.slot,
+                    reason = %evidence.reason,
+                    "Slash already applied for this (validator, slot) — skipping block evidence"
+                );
+                continue;
+            }
+
+            let rate_bps = slash_verify::slash_rate_bps(&proof.proof_type);
+            self.consensus
+                .slash_validator(&evidence.validator, u128::from(rate_bps));
+            match self.staking_state.slash(
+                evidence.validator,
+                u128::from(rate_bps),
+                block.header.slot,
+            ) {
+                Ok(slashed) => tracing::warn!(
+                    validator = ?evidence.validator,
+                    rate_bps,
+                    slashed,
+                    reason = %evidence.reason,
+                    "Slash applied (block evidence)"
+                ),
+                Err(e) => tracing::warn!(
+                    validator = ?evidence.validator,
+                    reason = %evidence.reason,
+                    err = %e,
+                    "Slash skipped (block evidence)"
+                ),
             }
         }
     }
@@ -1953,7 +2417,7 @@ impl Node {
     }
 
     pub fn finalized_slot(&self) -> Slot {
-        self.consensus.finalized_slot()
+        self.consensus.finalized_slot().max(self.finalized_tip_slot)
     }
 
     pub fn latest_block_slot(&self) -> Option<Slot> {
@@ -1962,15 +2426,6 @@ impl Node {
 
     pub fn latest_block_hash(&self) -> H256 {
         self.latest_block_hash
-    }
-
-    /// Returns the latest block hash only if we have processed at least one block.
-    fn latest_block_hash_if_set(&self) -> Option<H256> {
-        if self.latest_block_slot.is_some() {
-            Some(self.latest_block_hash)
-        } else {
-            None
-        }
     }
 
     pub fn allows_airdrop(&self) -> bool {
@@ -1984,8 +2439,47 @@ impl Node {
         self.ledger.seed_account(address, balance)
     }
 
+    /// Apply genesis balances once (first start of a fresh database) and
+    /// remember the genesis time. Returns true if genesis was applied now.
+    pub fn apply_genesis(
+        &mut self,
+        accounts: &[(Address, u128)],
+        genesis_time_ms: u64,
+    ) -> Result<bool> {
+        if self
+            .ledger
+            .storage()
+            .get(CF_METADATA, b"genesis_applied")?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        self.ledger.seed_accounts(accounts)?;
+        let mut batch = StorageBatch::new();
+        batch.put(CF_METADATA, b"genesis_applied".to_vec(), vec![1]);
+        batch.put(
+            CF_METADATA,
+            b"genesis_time_ms".to_vec(),
+            genesis_time_ms.to_le_bytes().to_vec(),
+        );
+        self.ledger.write_batch(batch)?;
+        Ok(true)
+    }
+
+    /// Genesis time recorded by `apply_genesis`, if any.
+    pub fn stored_genesis_time_ms(&self) -> Option<u64> {
+        let bytes = self
+            .ledger
+            .storage()
+            .get(CF_METADATA, b"genesis_time_ms")
+            .ok()
+            .flatten()?;
+        let arr: [u8; 8] = bytes.as_slice().try_into().ok()?;
+        Some(u64::from_le_bytes(arr))
+    }
+
     pub fn get_block_by_slot(&self, slot: Slot) -> Option<Block> {
-        // Check in-memory cache first
+        // Finalized chain: in-memory index first, then RocksDB.
         if let Some(block) = self
             .blocks_by_slot
             .get(&slot)
@@ -1993,16 +2487,131 @@ impl Node {
         {
             return Some(block.clone());
         }
-        // Fall back to RocksDB: slot index → hash → block
         let slot_key = format!("slot:{}", slot);
-        let hash_bytes = self
+        if let Some(hash) = self
             .ledger
             .storage()
             .get(CF_METADATA, slot_key.as_bytes())
             .ok()
-            .flatten()?;
-        let hash = H256::from_slice(&hash_bytes).ok()?;
-        self.get_block_by_hash(hash)
+            .flatten()
+            .and_then(|bytes| H256::from_slice(&bytes).ok())
+        {
+            return self.get_block_by_hash(hash);
+        }
+        // Not final yet: the pending block at this slot on the head chain.
+        if slot > self.finalized_tip_slot {
+            for hash in self.head_chain() {
+                if let Some(p) = self.pending.get(&hash) {
+                    if p.block.header.slot == slot {
+                        return Some(p.block.clone());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Pending blocks from the newest tip back to the finalized tip
+    /// (newest first). Ties at the tip go to the certified block.
+    pub fn head_chain(&self) -> Vec<H256> {
+        let tip = self
+            .pending
+            .iter()
+            .max_by_key(|(hash, p)| {
+                (
+                    p.block.header.slot,
+                    self.consensus.qc_for(hash).is_some(),
+                    hash.0,
+                )
+            })
+            .map(|(hash, _)| *hash);
+        let mut out = Vec::new();
+        let mut hash = match tip {
+            Some(h) => h,
+            None => return out,
+        };
+        while let Some(p) = self.pending.get(&hash) {
+            out.push(hash);
+            hash = p.block.header.parent_hash;
+        }
+        out
+    }
+
+    /// Whether `hash` is finalized on this node.
+    pub fn is_finalized(&self, hash: &H256, slot: Slot) -> bool {
+        if slot > self.finalized_tip_slot {
+            return false;
+        }
+        if self.blocks_by_slot.get(&slot) == Some(hash) || *hash == self.finalized_hash {
+            return true;
+        }
+        let slot_key = format!("slot:{}", slot);
+        self.ledger
+            .storage()
+            .get(CF_METADATA, slot_key.as_bytes())
+            .ok()
+            .flatten()
+            .is_some_and(|bytes| bytes.as_slice() == hash.as_bytes())
+    }
+
+    /// Hash and slot of the finalized tip.
+    pub fn finalized_tip(&self) -> (H256, Slot) {
+        (self.finalized_hash, self.finalized_tip_slot)
+    }
+
+    /// Address of the local validator key, if any.
+    pub fn validator_address(&self) -> Option<Address> {
+        self.validator_key
+            .as_ref()
+            .map(|k| Address::from(k.to_address()))
+    }
+
+    pub fn pending_block_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn block_times(&self, hash: &H256) -> Option<BlockTimes> {
+        self.block_times.get(hash).copied()
+    }
+
+    /// QC certifying `hash`, if known.
+    pub fn qc_for(&self, hash: &H256) -> Option<AggregatedVote> {
+        self.qc_for_block(hash)
+    }
+
+    /// Account state as of the newest pending block on the head chain
+    /// (includes not-yet-final transactions).
+    pub fn get_account_pending(&self, address: Address) -> Result<Account> {
+        let head = self.head_chain().first().copied();
+        let overlay = head
+            .and_then(|h| self.pending.get(&h))
+            .map(|p| p.overlay.clone());
+        self.ledger.account_in(overlay.as_deref(), &address)
+    }
+
+    /// Contract storage, finalized (`pending = false`) or as of the head chain.
+    pub fn get_contract_storage(
+        &self,
+        address: Address,
+        pending: bool,
+    ) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
+        if pending {
+            let head = self.head_chain().first().copied();
+            let overlay = head
+                .and_then(|h| self.pending.get(&h))
+                .map(|p| p.overlay.clone());
+            self.ledger
+                .contract_storage_in(overlay.as_deref(), &address)
+        } else {
+            self.ledger.contract_storage_in(None, &address)
+        }
+    }
+
+    /// Accept many transactions at once (RPC batch submission).
+    pub fn submit_transactions(&mut self, txs: Vec<Transaction>) -> Vec<Result<H256>> {
+        txs.into_iter()
+            .map(|tx| self.submit_transaction(tx))
+            .collect()
     }
 
     pub fn get_block_by_hash(&self, hash: H256) -> Option<Block> {
@@ -2020,17 +2629,30 @@ impl Node {
     }
 
     pub fn get_transaction_receipt(&self, tx_hash: H256) -> Option<TransactionReceipt> {
-        // Check in-memory cache first (recent receipts)
+        // Check in-memory cache first (recent finalized receipts)
         if let Some(receipt) = self.receipts.get(&tx_hash) {
             return Some(receipt.clone());
         }
-        // Fall back to RocksDB for older/pre-restart receipts
-        self.ledger
+        // Then RocksDB for older/pre-restart receipts
+        if let Some(receipt) = self
+            .ledger
             .storage()
             .get(CF_RECEIPTS, tx_hash.as_bytes())
             .ok()
             .flatten()
             .and_then(|bytes| bincode::deserialize(&bytes).ok())
+        {
+            return Some(receipt);
+        }
+        // Finally, included in a pending (not yet final) block on the head chain.
+        for hash in self.head_chain() {
+            if let Some(p) = self.pending.get(&hash) {
+                if let Some(r) = p.receipts.iter().find(|r| r.tx_hash == tx_hash) {
+                    return Some(r.clone());
+                }
+            }
+        }
+        None
     }
 
     pub fn get_account(&self, address: Address) -> Result<Option<Account>> {

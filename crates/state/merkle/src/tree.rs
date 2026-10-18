@@ -14,6 +14,8 @@ use std::collections::HashMap;
 #[derive(Clone, Debug)]
 pub struct SparseMerkleTree {
     root: H256,
+    /// True when leaves were changed via `set_leaf` and `root` is stale.
+    dirty: bool,
     leaves: HashMap<Address, H256>,
     /// defaults[0] = empty leaf hash, defaults[d] = hash of empty subtree of height d
     defaults: Vec<H256>,
@@ -28,6 +30,7 @@ impl SparseMerkleTree {
 
         SparseMerkleTree {
             root,
+            dirty: false,
             leaves: HashMap::new(),
             defaults,
             depth,
@@ -37,11 +40,32 @@ impl SparseMerkleTree {
     pub fn update(&mut self, key: Address, value_hash: H256) {
         self.leaves.insert(key, value_hash);
         self.root = self.compute_root();
+        self.dirty = false;
+    }
+
+    /// Set a leaf without recomputing the root.
+    ///
+    /// Recomputing the root costs O(leaves * depth) hashes, so block execution
+    /// batches all leaf changes with `set_leaf` and calls [`Self::recompute`]
+    /// once per block. `root()` stays correct in between (it recomputes on
+    /// demand while dirty), it is just slower.
+    pub fn set_leaf(&mut self, key: Address, value_hash: H256) {
+        self.leaves.insert(key, value_hash);
+        self.dirty = true;
+    }
+
+    /// Recompute and cache the root after one or more `set_leaf` calls.
+    pub fn recompute(&mut self) {
+        if self.dirty {
+            self.root = self.compute_root();
+            self.dirty = false;
+        }
     }
 
     pub fn delete(&mut self, key: &Address) {
         self.leaves.remove(key);
         self.root = self.compute_root();
+        self.dirty = false;
     }
 
     pub fn get(&self, key: &Address) -> Option<H256> {
@@ -49,7 +73,11 @@ impl SparseMerkleTree {
     }
 
     pub fn root(&self) -> H256 {
-        self.root
+        if self.dirty {
+            self.compute_root()
+        } else {
+            self.root
+        }
     }
 
     /// Generate a Merkle proof for a key.
@@ -196,6 +224,22 @@ fn precompute_defaults(depth: usize) -> Vec<H256> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_leaf_then_recompute_matches_eager_updates() {
+        let mut eager = SparseMerkleTree::new();
+        let mut lazy = SparseMerkleTree::new();
+        for i in 0..20u8 {
+            let key = Address::from([i; 20]);
+            let value = H256::from([i.wrapping_mul(7); 32]);
+            eager.update(key, value);
+            lazy.set_leaf(key, value);
+        }
+        // root() is correct while dirty, and recompute() caches the same value.
+        assert_eq!(lazy.root(), eager.root());
+        lazy.recompute();
+        assert_eq!(lazy.root(), eager.root());
+    }
 
     #[test]
     fn test_empty_tree() {

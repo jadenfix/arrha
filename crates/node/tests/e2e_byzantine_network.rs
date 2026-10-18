@@ -164,6 +164,9 @@ impl ByzantineTestNetwork {
                     OutboundMessage::BroadcastTransaction(tx) => {
                         self.pending_txs.push(tx);
                     }
+                    OutboundMessage::BroadcastTransactions(txs) => {
+                        self.pending_txs.extend(txs);
+                    }
                     OutboundMessage::RequestBlockRange { .. } => {}
                 }
             }

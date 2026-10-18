@@ -23,7 +23,13 @@ const MAX_TABLE_ELEMENTS: usize = 10_000;
 pub struct WasmVm {
     engine: Engine,
     gas_limit: u64,
+    /// Compiled modules keyed by SHA-256 of the WASM bytes. Compiling with
+    /// Cranelift costs milliseconds, so contract calls reuse the module.
+    module_cache: HashMap<[u8; 32], Module>,
 }
+
+/// Maximum number of compiled modules kept in [`WasmVm`]'s cache.
+const MAX_CACHED_MODULES: usize = 256;
 
 #[derive(Debug, Clone)]
 pub struct ExecutionContext {
@@ -109,7 +115,45 @@ impl WasmVm {
         let engine = Engine::new(&config)
             .map_err(|e| anyhow::anyhow!("failed to create Wasmtime engine: {e}"))?;
 
-        Ok(WasmVm { engine, gas_limit })
+        Ok(WasmVm {
+            engine,
+            gas_limit,
+            module_cache: HashMap::new(),
+        })
+    }
+
+    /// Compile (or fetch from cache) a module after basic validation.
+    fn module_for(&mut self, wasm_bytes: &[u8]) -> Result<Module> {
+        // Validate WASM magic number
+        if wasm_bytes.len() < 4 || &wasm_bytes[0..4] != b"\0asm" {
+            bail!("invalid WASM magic number");
+        }
+        if wasm_bytes.len() > 1024 * 1024 {
+            bail!("WASM module too large (max 1MB)");
+        }
+        use sha2::{Digest, Sha256};
+        let key: [u8; 32] = Sha256::digest(wasm_bytes).into();
+        if let Some(module) = self.module_cache.get(&key) {
+            return Ok(module.clone());
+        }
+        let module = Module::new(&self.engine, wasm_bytes)?;
+        if self.module_cache.len() >= MAX_CACHED_MODULES {
+            self.module_cache.clear();
+        }
+        self.module_cache.insert(key, module.clone());
+        Ok(module)
+    }
+
+    /// Check that `wasm_bytes` compiles and exports an `execute` entry point.
+    pub fn validate_module(&mut self, wasm_bytes: &[u8]) -> Result<()> {
+        let module = self.module_for(wasm_bytes)?;
+        let has_execute = module
+            .exports()
+            .any(|e| e.name() == "execute" && matches!(e.ty(), ExternType::Func(_)));
+        if !has_execute {
+            bail!("contract must export an `execute(i32, i32) -> i32` function");
+        }
+        Ok(())
     }
 
     /// Execute WASM bytecode with the given context and input.
@@ -119,6 +163,18 @@ impl WasmVm {
         context: &ExecutionContext,
         input: &[u8],
     ) -> Result<ExecutionResult> {
+        self.execute_with_storage(wasm_bytes, context, input, HashMap::new())
+    }
+
+    /// Execute with the contract's existing storage visible to `storage_read`.
+    /// `ExecutionResult::storage_changes` holds the full storage after the call.
+    pub fn execute_with_storage(
+        &mut self,
+        wasm_bytes: &[u8],
+        context: &ExecutionContext,
+        input: &[u8],
+        storage: HashMap<Vec<u8>, Vec<u8>>,
+    ) -> Result<ExecutionResult> {
         if context.gas_limit > self.gas_limit {
             bail!(
                 "context gas_limit {} exceeds VM cap {}",
@@ -127,21 +183,16 @@ impl WasmVm {
             );
         }
 
-        // Validate WASM magic number
-        if wasm_bytes.len() < 4 || &wasm_bytes[0..4] != b"\0asm" {
-            bail!("invalid WASM magic number");
-        }
+        // Compile (cached) the module
+        let module = self.module_for(wasm_bytes)?;
 
-        if wasm_bytes.len() > 1024 * 1024 {
-            bail!("WASM module too large (max 1MB)");
-        }
-
-        // Compile the module
-        let module = Module::new(&self.engine, wasm_bytes)?;
+        // Keep the pre-call storage so a failed `execute` can be rolled back
+        // before the fallback entry point runs.
+        let initial_storage = storage.clone();
 
         // Create store with fuel (gas)
         let host_state = Arc::new(Mutex::new(HostState {
-            storage: HashMap::new(),
+            storage,
             logs: Vec::new(),
             return_data: Vec::new(),
             context: context.clone(),
@@ -198,7 +249,7 @@ impl WasmVm {
                             // `execute` call (storage writes, logs, return_data) do not
                             // leak into the fallback entry point.
                             if let Ok(mut state) = host_state.lock() {
-                                state.storage.clear();
+                                state.storage = initial_storage.clone();
                                 state.logs.clear();
                                 state.return_data.clear();
                             }
@@ -533,6 +584,54 @@ pub mod gas_costs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const COUNTER_WAT: &str = include_str!("../../../examples/contracts/counter.wat");
+
+    fn counter_ctx() -> ExecutionContext {
+        ExecutionContext {
+            contract_address: Address::from_slice(&[1u8; 20]).unwrap(),
+            caller: Address::from_slice(&[2u8; 20]).unwrap(),
+            value: 0,
+            gas_limit: 100_000,
+            block_number: 1,
+            timestamp: 1000,
+        }
+    }
+
+    #[test]
+    fn counter_contract_reads_existing_storage() {
+        let wasm = wat::parse_str(COUNTER_WAT).unwrap();
+        let mut vm = WasmVm::new(1_000_000).unwrap();
+        vm.validate_module(&wasm).unwrap();
+
+        let first = vm
+            .execute_with_storage(&wasm, &counter_ctx(), b"", HashMap::new())
+            .unwrap();
+        assert!(first.success);
+        assert_eq!(first.return_data, 1u64.to_le_bytes().to_vec());
+
+        // Second call sees the first call's storage and adds 5.
+        let second = vm
+            .execute_with_storage(
+                &wasm,
+                &counter_ctx(),
+                &5u64.to_le_bytes(),
+                first.storage_changes.clone(),
+            )
+            .unwrap();
+        assert!(second.success);
+        assert_eq!(second.return_data, 6u64.to_le_bytes().to_vec());
+        assert_eq!(second.logs.len(), 1);
+        assert!(second.gas_used > 0);
+    }
+
+    #[test]
+    fn validate_module_requires_execute_export() {
+        let wasm =
+            wat::parse_str("(module (func (export \"main\") (result i32) i32.const 0))").unwrap();
+        let mut vm = WasmVm::new(100_000).unwrap();
+        assert!(vm.validate_module(&wasm).is_err());
+    }
 
     #[test]
     fn test_vm_creation() {

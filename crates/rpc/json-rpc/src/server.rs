@@ -173,6 +173,10 @@ pub trait RpcBackend: Send + Sync {
     fn request_airdrop(&self, _address: Address, _amount: u128) -> Result<()> {
         Err(anyhow::anyhow!("airdrop not supported"))
     }
+    /// Backend-specific methods. Return `None` for unknown methods.
+    fn extension(&self, _method: &str, _params: &[Value]) -> Option<Result<Value>> {
+        None
+    }
 }
 
 /// Subscription topics for WebSocket clients.
@@ -587,11 +591,22 @@ async fn process_rpc_request<B: RpcBackend>(
         "aeth_getFinalizedSlot" => handle_get_finalized_slot(backend).await,
         "aeth_requestAirdrop" => handle_request_airdrop(&req.params, backend).await,
         "aeth_health" => handle_health(backend).await,
-        _ => Err(JsonRpcError {
-            code: -32601,
-            message: format!("Method not found: {}", req.method),
-            data: None,
-        }),
+        other => {
+            let backend = backend.read().await;
+            match backend.extension(other, &req.params) {
+                Some(Ok(value)) => Ok(value),
+                Some(Err(e)) => Err(JsonRpcError {
+                    code: -32000,
+                    message: e.to_string(),
+                    data: None,
+                }),
+                None => Err(JsonRpcError {
+                    code: -32601,
+                    message: format!("Method not found: {}", req.method),
+                    data: None,
+                }),
+            }
+        }
     };
 
     timer.observe_duration();

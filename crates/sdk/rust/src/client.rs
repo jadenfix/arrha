@@ -340,7 +340,11 @@ impl AetherClient {
     /// there.  A stalled server cannot block any query method indefinitely.
     ///
     /// On JSON-RPC error, maps to `AetherSdkError::Rpc`.
-    async fn rpc_call(&self, method: &str, params: &[Value]) -> Result<Value, AetherSdkError> {
+    pub(crate) async fn rpc_call(
+        &self,
+        method: &str,
+        params: &[Value],
+    ) -> Result<Value, AetherSdkError> {
         let payload = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,

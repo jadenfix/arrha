@@ -13,4 +13,9 @@ mod proptest_tests;
 
 pub use emission::EmissionSchedule;
 pub use fee_market::FeeMarket;
-pub use state::Ledger;
+pub use state::{
+    BlockContext, ContractCall, ContractExecutor, ContractOutcome, Ledger, PendingOverlay,
+    MAX_CONTRACT_CODE_BYTES,
+};
+
+pub use aether_state_merkle::SparseMerkleTree;

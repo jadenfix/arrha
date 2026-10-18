@@ -1,0 +1,55 @@
+{
+  "runs": [
+    {
+      "aggregateSameMessage": {
+        "note": "aggregate pubkeys + signatures, then one pairing check (QC verification)",
+        "sigsPerSec": 8438.77510025681,
+        "totalMs": 121.344625
+      },
+      "batchSpeedup": 5.989750312789084,
+      "batchVerifyDistinctMessages": {
+        "sigsPerSec": 12641.559073604329,
+        "totalMs": 81.002667
+      },
+      "signatures": 1024,
+      "singleVerify": {
+        "sigsPerSec": 2110.5318942281383,
+        "totalMs": 485.18575000000004
+      }
+    },
+    {
+      "aggregateSameMessage": {
+        "note": "aggregate pubkeys + signatures, then one pairing check (QC verification)",
+        "sigsPerSec": 8414.836033057618,
+        "totalMs": 121.68983399999999
+      },
+      "batchSpeedup": 5.804510778040585,
+      "batchVerifyDistinctMessages": {
+        "sigsPerSec": 12324.42493649521,
+        "totalMs": 83.087041
+      },
+      "signatures": 1024,
+      "singleVerify": {
+        "sigsPerSec": 2123.2495567275937,
+        "totalMs": 482.279625
+      }
+    },
+    {
+      "aggregateSameMessage": {
+        "note": "aggregate pubkeys + signatures, then one pairing check (QC verification)",
+        "sigsPerSec": 5133.494674124605,
+        "totalMs": 199.47424999999998
+      },
+      "batchSpeedup": 5.798059420785477,
+      "batchVerifyDistinctMessages": {
+        "sigsPerSec": 12233.603283002132,
+        "totalMs": 83.703875
+      },
+      "signatures": 1024,
+      "singleVerify": {
+        "sigsPerSec": 2109.947897247458,
+        "totalMs": 485.320041
+      }
+    }
+  ]
+}

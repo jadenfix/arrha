@@ -211,6 +211,47 @@ jobs:
           cargo test --all-features -p aether-node --test e2e_adversarial
 
   # ──────────────────────────────────────────────
+  # Devnet E2E: 4 validator processes over real libp2p networking.
+  # Asserts finality, transfers, WASM deploy/call, QCs, and liveness with one
+  # validator killed + catch-up after restart (scripts/e2e-devnet.sh).
+  # ──────────────────────────────────────────────
+  devnet-e2e:
+    name: Devnet E2E (4 validators)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-devnet-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-devnet-e2e-
+
+      - name: Build node, genesis ceremony and aetherctl
+        run: cargo build --release -p aether-node -p aether-cli --bins
+
+      - name: Run devnet E2E
+        run: SKIP_BUILD=1 KEEP_DEVNET_DATA=1 ./scripts/e2e-devnet.sh
+
+      - name: Upload devnet logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: devnet-e2e-logs
+          path: data/e2e-devnet/*.log
+
+  # ──────────────────────────────────────────────
   # Phase acceptance suites removed from CI on 2026-04-10.
   #
   # Why: Phase 4 and Phase 5 had been red on main for 10+ days, blocking

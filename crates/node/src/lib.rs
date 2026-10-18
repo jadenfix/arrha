@@ -19,6 +19,8 @@ pub use hybrid_node::{
     create_hybrid_consensus, create_hybrid_consensus_with_all_keys,
     create_hybrid_consensus_with_vrf_keys, validator_info_from_keypair, ValidatorKeypair,
 };
-pub use network_handler::{decode_network_event, NodeMessage, OutboundMessage, SyncRequest};
-pub use node::{compute_receipts_root, compute_transactions_root, Node};
+pub use network_handler::{
+    decode_network_event, encode_tx_batch, NodeMessage, OutboundMessage, SyncRequest,
+};
+pub use node::{compute_receipts_root, compute_transactions_root, unix_millis, BlockTimes, Node};
 pub use poh::{PohMetrics, PohRecorder};

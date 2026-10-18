@@ -6,6 +6,42 @@ use std::collections::HashSet;
 
 pub const TRANSFER_PROGRAM_ID: H256 = H256([1u8; 32]);
 
+/// Program id for deploying a WASM contract. `data` is `bincode(DeployPayload)`.
+pub const DEPLOY_PROGRAM_ID: H256 = H256([2u8; 32]);
+
+/// Program id for calling a deployed WASM contract. `data` is `bincode(CallPayload)`.
+pub const CALL_PROGRAM_ID: H256 = H256([3u8; 32]);
+
+/// Payload of a contract deployment transaction.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeployPayload {
+    /// WASM module bytes. Must export `execute(ptr: i32, len: i32) -> i32`.
+    pub code: Vec<u8>,
+}
+
+/// Payload of a contract call transaction.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CallPayload {
+    /// Address of the deployed contract.
+    pub contract: Address,
+    /// Opaque input passed to the contract's `execute` entry point.
+    pub input: Vec<u8>,
+}
+
+/// Deterministic address of a contract deployed by `deployer` with `nonce`:
+/// the first 20 bytes of `SHA-256("aether-contract" || deployer || nonce_le)`.
+pub fn contract_address(deployer: &Address, nonce: u64) -> Address {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"aether-contract");
+    hasher.update(deployer.as_bytes());
+    hasher.update(nonce.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut out = [0u8; 20];
+    out.copy_from_slice(&digest[..20]);
+    Address::from(out)
+}
+
 // Legacy chain ID constants -- prefer ChainConfig presets for new code.
 pub const MAINNET_CHAIN_ID: u64 = 1;
 pub const TESTNET_CHAIN_ID: u64 = 100;
@@ -72,13 +108,54 @@ pub struct Log {
 }
 
 impl Transaction {
+    /// Transaction id: SHA-256 of the canonical encoding without signature.
+    ///
+    /// `reads`/`writes` are hash sets whose iteration order depends on a
+    /// per-process random seed, so they are hashed in sorted order. (Hashing
+    /// the sets as-is gave a different id in the signer's process than in
+    /// the validators' processes for any tx with 2+ entries, so signatures
+    /// failed at random on a real multi-process network.)
     pub fn hash(&self) -> H256 {
         use sha2::{Digest, Sha256};
-        let mut tx = self.clone();
-        tx.signature = Signature::from_bytes(vec![]);
+
+        #[derive(Serialize)]
+        struct Canonical<'a> {
+            nonce: u64,
+            chain_id: u64,
+            sender: &'a Address,
+            sender_pubkey: &'a PublicKey,
+            inputs: &'a Vec<UtxoId>,
+            outputs: &'a Vec<UtxoOutput>,
+            reads: Vec<&'a Address>,
+            writes: Vec<&'a Address>,
+            program_id: &'a Option<H256>,
+            data: &'a Vec<u8>,
+            gas_limit: u64,
+            fee: u128,
+            signature: Signature,
+        }
+        let mut reads: Vec<&Address> = self.reads.iter().collect();
+        reads.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        let mut writes: Vec<&Address> = self.writes.iter().collect();
+        writes.sort_unstable_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+        let canonical = Canonical {
+            nonce: self.nonce,
+            chain_id: self.chain_id,
+            sender: &self.sender,
+            sender_pubkey: &self.sender_pubkey,
+            inputs: &self.inputs,
+            outputs: &self.outputs,
+            reads,
+            writes,
+            program_id: &self.program_id,
+            data: &self.data,
+            gas_limit: self.gas_limit,
+            fee: self.fee,
+            signature: Signature::from_bytes(vec![]),
+        };
         // bincode::serialize on a valid struct cannot fail;
         // SHA256 always produces 32 bytes matching H256.
-        let bytes = bincode::serialize(&tx).expect("tx serialization infallible");
+        let bytes = bincode::serialize(&canonical).expect("tx serialization infallible");
         let hash = Sha256::digest(&bytes);
         H256::from_slice(&hash).expect("SHA256 produces 32 bytes")
     }
@@ -214,6 +291,28 @@ mod tests {
         let signature = keypair.sign(hash.as_bytes());
         tx.signature = TxSignature::from_bytes(signature);
         tx
+    }
+
+    #[test]
+    fn hash_is_independent_of_set_iteration_order() {
+        let keypair = Keypair::generate();
+        let mut tx = signed_transaction(&keypair);
+        for i in 0..16u8 {
+            tx.writes.insert(H160([i; 20]));
+            tx.reads.insert(H160([i.wrapping_add(100); 20]));
+        }
+        // A deserialized copy gets fresh HashSets with a different random
+        // iteration order, as on a remote validator.
+        let bytes = bincode::serialize(&tx).unwrap();
+        for _ in 0..8 {
+            let copy: Transaction = bincode::deserialize(&bytes).unwrap();
+            let rebuilt = Transaction {
+                reads: copy.reads.iter().cloned().collect(),
+                writes: copy.writes.iter().cloned().collect(),
+                ..copy
+            };
+            assert_eq!(rebuilt.hash(), tx.hash());
+        }
     }
 
     #[test]

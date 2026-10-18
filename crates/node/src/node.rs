@@ -2072,12 +2072,15 @@ impl Node {
         }
 
         let finalized_slot = self.consensus.finalized_slot();
-        if finalized_slot <= self.finalized_tip_slot && self.finalized_tip_slot > 0 {
-            return;
-        }
         let target = match self.consensus.finalized_block() {
             Some(hash) => Some(hash),
-            None => self.pending_on_head_chain_at(finalized_slot),
+            // Engines that only report a slot: map it onto our head chain,
+            // but only once it moves past what we already persisted (slot 0
+            // with nothing finalized must not finalize a slot-0 proposal).
+            None if finalized_slot > self.finalized_tip_slot => {
+                self.pending_on_head_chain_at(finalized_slot)
+            }
+            None => None,
         };
         let Some(target) = target else {
             return;

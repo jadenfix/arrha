@@ -1,0 +1,182 @@
+{
+  "transfer": [
+    {
+      "offered": 100,
+      "submitted": 4000,
+      "finalized": 4000,
+      "lost": 0,
+      "finalizedTpsSteadyWindow": 116.7,
+      "p50": 1570,
+      "p95": 4627,
+      "p99": 6223,
+      "max": 6521,
+      "meanTxsPerBlock": 92.9
+    },
+    {
+      "offered": 200,
+      "submitted": 8000,
+      "finalized": 8000,
+      "lost": 0,
+      "finalizedTpsSteadyWindow": 236.7,
+      "p50": 2130,
+      "p95": 6564,
+      "p99": 7763,
+      "max": 8062,
+      "meanTxsPerBlock": 203.5
+    },
+    {
+      "offered": 300,
+      "submitted": 12000,
+      "finalized": 12000,
+      "lost": 0,
+      "finalizedTpsSteadyWindow": 300.1,
+      "p50": 1721,
+      "p95": 3760,
+      "p99": 4294,
+      "max": 4593,
+      "meanTxsPerBlock": 280.3
+    },
+    {
+      "offered": 400,
+      "submitted": 16000,
+      "finalized": 16000,
+      "lost": 0,
+      "finalizedTpsSteadyWindow": 390.1,
+      "p50": 2049,
+      "p95": 5903,
+      "p99": 8376,
+      "max": 11526,
+      "meanTxsPerBlock": 363.6
+    },
+    {
+      "offered": 500,
+      "submitted": 20000,
+      "finalized": 20000,
+      "lost": 0,
+      "finalizedTpsSteadyWindow": 428.4,
+      "p50": 3170,
+      "p95": 24539,
+      "p99": 34709,
+      "max": 38449,
+      "meanTxsPerBlock": 462.6
+    }
+  ],
+  "contract": [
+    {
+      "offered": 25,
+      "submitted": 1000,
+      "finalized": 1000,
+      "lost": 0,
+      "finalizedTpsSteadyWindow": 27.9,
+      "p50": 1786,
+      "p95": 4522,
+      "p99": 5322,
+      "max": 5522,
+      "meanTxsPerBlock": 24.9
+    },
+    {
+      "offered": 50,
+      "submitted": 2000,
+      "finalized": 2000,
+      "lost": 0,
+      "finalizedTpsSteadyWindow": 48.3,
+      "p50": 2672,
+      "p95": 5828,
+      "p99": 6330,
+      "max": 6569,
+      "meanTxsPerBlock": 55.4
+    },
+    {
+      "offered": 100,
+      "submitted": 4000,
+      "finalized": 4000,
+      "lost": 0,
+      "finalizedTpsSteadyWindow": 98.3,
+      "p50": 2622,
+      "p95": 8704,
+      "p99": 12098,
+      "max": 13598,
+      "meanTxsPerBlock": 83.5
+    },
+    {
+      "offered": 150,
+      "submitted": 6000,
+      "finalized": 6000,
+      "lost": 0,
+      "finalizedTpsSteadyWindow": 123.3,
+      "p50": 3663,
+      "p95": 30134,
+      "p99": 35630,
+      "max": 38031,
+      "meanTxsPerBlock": 100.0
+    }
+  ],
+  "idle": {
+    "slotMs": 500,
+    "slotsObserved": 124,
+    "finalizedBlocks": 61,
+    "blocksPerSlot": 0.492,
+    "meanFinalizedBlockIntervalMs": 1033,
+    "seenToFinalMs": {
+      "p50": 1505,
+      "p95": 5007,
+      "p99": 5513
+    }
+  },
+  "liveness": {
+    "schedule": {
+      "killAfterS": 25.0,
+      "restartAfterS": 55.7
+    },
+    "finalizedBlocks": {
+      "before": 24,
+      "whileDown": 29,
+      "afterRestart": 36
+    },
+    "durationsS": {
+      "before": 25.0,
+      "whileDown": 30.6,
+      "afterRestart": 30
+    },
+    "maxGapBetweenFinalizedBlocksWhileDownMs": 7484,
+    "restartedValidatorFirstFinalAfterRestartMs": 1801,
+    "load": {
+      "accepted": 9000,
+      "blocks": {
+        "finalizedBlocksDuringRun": 93,
+        "maxTxsPerBlock": 451,
+        "meanFinalizedBlockIntervalMs": 956.5217391304348,
+        "meanTxsPerBlock": 95.54838709677419,
+        "p50FinalizedBlockIntervalMs": 500,
+        "slotsDuringRun": 180.004
+      },
+      "contract": null,
+      "durationS": 90,
+      "endpoints": 3,
+      "finalityMs": {
+        "max": 8046,
+        "p50": 2161,
+        "p95": 5807,
+        "p99": 7186,
+        "samples": 8502
+      },
+      "finalized": 9000,
+      "finalizedTpsSteadyWindow": 101.16232559233902,
+      "generated": 9000,
+      "mode": "transfer",
+      "notFinalizedAfterDrain": 0,
+      "offeredRateTps": 100,
+      "rejectedAtSubmit": 0,
+      "senders": 5,
+      "warmupS": 5
+    }
+  },
+  "bls": {
+    "signatures": 1024,
+    "runs": 3,
+    "singleVerifyPerSec": 2111,
+    "batchVerifyPerSec": 12324,
+    "aggregateSameMessagePerSec": 8415,
+    "batchSpeedup": 5.8
+  }
+}

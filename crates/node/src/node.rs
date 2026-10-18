@@ -1261,6 +1261,8 @@ impl Node {
         } else {
             match self.qc_for_block(&parent_hash) {
                 Some(qc) => Some(qc),
+                // Engines without a voting finality gadget have no QCs.
+                None if self.consensus.finalizes_on_execution() => None,
                 None => {
                     tracing::debug!(slot, ?parent_hash, "No QC for parent — not proposing");
                     return Ok(());

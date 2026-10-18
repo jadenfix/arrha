@@ -249,7 +249,7 @@ mod tests {
             "block limit out of sync with p2p"
         );
         assert_eq!(MAX_VOTE_SIZE, 8 * 1024, "vote limit out of sync with p2p");
-        assert_eq!(MAX_TX_SIZE, 64 * 1024, "tx limit out of sync with p2p");
+        assert_eq!(MAX_TX_SIZE, 1024 * 1024, "tx limit out of sync with p2p");
         assert_eq!(
             MAX_SHRED_SIZE,
             256 * 1024,

@@ -772,10 +772,9 @@ impl Node {
             "PoH tick"
         );
 
-        // Slot 0 is the genesis slot; nobody proposes there. A node that is
-        // missing blocks (orphans buffered) would only build a stale fork, so
-        // it catches up first.
-        if slot > 0 && self.orphan_count == 0 {
+        // A node that is missing blocks (orphans buffered) would only build a
+        // stale fork, so it catches up first.
+        if self.orphan_count == 0 {
             if let Some(ref keypair) = self.validator_key {
                 let pubkey = PublicKey::from_bytes(keypair.public_key());
 
@@ -1346,6 +1345,9 @@ impl Node {
         }));
 
         self.insert_pending(block.clone(), block_hash, executed);
+        if self.consensus.finalizes_on_execution() {
+            self.finalize_through(block_hash)?;
+        }
 
         // Broadcast block to network, then vote for it.
         self.broadcast(OutboundMessage::BroadcastBlock(block.clone()));
@@ -1458,10 +1460,10 @@ impl Node {
             tracing::info_span!("on_block_received", slot = block.header.slot, ?block_hash,)
                 .entered();
 
-        // Already known (pending or finalized)
+        // Already known (pending, finalized or cached)
         if self.pending.contains_key(&block_hash)
             || block_hash == self.finalized_hash
-            || self.blocks_by_slot.get(&block.header.slot) == Some(&block_hash)
+            || self.blocks_by_hash.contains_key(&block_hash)
         {
             return Ok(());
         }
@@ -1481,19 +1483,16 @@ impl Node {
         }
 
         let parent_hash = block.header.parent_hash;
-        let parent_known =
+        // State we can execute on: the finalized tip or a pending block.
+        let parent_state_known =
             parent_hash == self.finalized_hash || self.pending.contains_key(&parent_hash);
-        if !parent_known {
-            // A parent that is final but not the tip means this block is on a
-            // branch that lost; anything else is an orphan we buffer until its
-            // parent arrives (catch-up requests fetch missing ancestors).
-            let parent_is_old_final = parent_hash != H256::zero()
-                && self
-                    .block_slot(&parent_hash)
-                    .is_some_and(|s| s < self.finalized_tip_slot);
-            if parent_is_old_final || (parent_hash == H256::zero() && self.finalized_tip_slot > 0) {
-                return Ok(());
-            }
+        // Header we can validate against (also older finalized blocks).
+        let parent_header_known = parent_state_known
+            || parent_hash == H256::zero()
+            || self.blocks_by_hash.contains_key(&parent_hash);
+        if !parent_header_known {
+            // Orphan: buffer until its parent arrives (catch-up requests
+            // fetch missing ancestors).
             if self.orphan_count < MAX_ORPHAN_BLOCKS {
                 let already = self
                     .orphan_blocks
@@ -1643,6 +1642,16 @@ impl Node {
             }
         }
 
+        // A valid block whose parent state we no longer have extends a branch
+        // that lost to finality (or genesis after the chain moved on).
+        if !parent_state_known {
+            tracing::debug!(
+                slot = block.header.slot,
+                "Ignoring block on a branch that conflicts with finality"
+            );
+            return Ok(());
+        }
+
         // Execute on top of the parent's state (nothing written to disk)
         let exec_start = Instant::now();
         let context = BlockContext {
@@ -1683,6 +1692,9 @@ impl Node {
         }));
 
         self.insert_pending(block.clone(), block_hash, executed);
+        if self.consensus.finalizes_on_execution() {
+            self.finalize_through(block_hash)?;
+        }
 
         // Vote on this block (if we're a validator)
         self.vote_on_block(&block)?;
@@ -2400,7 +2412,7 @@ impl Node {
     }
 
     pub fn finalized_slot(&self) -> Slot {
-        self.consensus.finalized_slot()
+        self.consensus.finalized_slot().max(self.finalized_tip_slot)
     }
 
     pub fn latest_block_slot(&self) -> Option<Slot> {

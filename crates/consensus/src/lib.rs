@@ -100,6 +100,13 @@ pub trait ConsensusEngine: Finality + Send + Sync {
         self.validate_block(block)
     }
 
+    /// Engines without a voting-based finality gadget (the round-robin
+    /// `SimpleConsensus` used in single-node tests) treat every executed
+    /// block as final immediately.
+    fn finalizes_on_execution(&self) -> bool {
+        false
+    }
+
     /// HotStuff safe-node rule: may this validator vote for `block`?
     fn safe_to_vote(&self, _block: &Block) -> bool {
         true

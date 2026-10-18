@@ -470,6 +470,25 @@ impl Mempool {
         selected
     }
 
+    /// Highest-priority ready transactions WITHOUT removing them from the
+    /// pool. Block producers use this: a transaction must stay available
+    /// until its block is final, because the block may lose to a fork.
+    pub fn peek_transactions(&self, max_count: usize) -> Vec<Transaction> {
+        let mut ready: Vec<&PrioritizedTx> = self
+            .pending
+            .iter()
+            .filter(|p| self.by_hash.contains_key(&p.tx.hash()))
+            .collect();
+        ready.sort_by(|a, b| b.cmp(a));
+        let mut seen = HashSet::new();
+        ready
+            .into_iter()
+            .filter(|p| seen.insert(p.tx.hash()))
+            .take(max_count)
+            .map(|p| p.tx.clone())
+            .collect()
+    }
+
     /// Return transactions that MUST be included (anti-censorship).
     /// A tx must be included if it has waited > FORCED_INCLUSION_SLOTS
     /// and pays >= 2x the base_fee (clearly willing to pay market rate).
@@ -616,6 +635,16 @@ mod tests {
     fn create_test_tx(nonce: u64, fee: u128) -> Transaction {
         let kp = Keypair::generate();
         create_test_tx_with_keypair(&kp, nonce, fee)
+    }
+
+    #[test]
+    fn peek_transactions_does_not_remove() {
+        let mut pool = Mempool::with_defaults();
+        let tx = create_test_tx(0, 5_000_000);
+        pool.add_transaction(tx).unwrap();
+        assert_eq!(pool.peek_transactions(10).len(), 1);
+        assert_eq!(pool.peek_transactions(10).len(), 1);
+        assert_eq!(pool.get_transactions(10, u64::MAX).len(), 1);
     }
 
     #[test]

@@ -345,15 +345,25 @@ async fn run_slot_loop(
             tracing::info!("Slot loop received shutdown signal, stopping");
             return Ok(());
         }
+        // Run the slot logic as soon as a boundary has passed. Checking here
+        // (not only when the sleep below wins the select) matters under load:
+        // a steady stream of network events would otherwise keep winning the
+        // select and the validator would silently skip its leader slots.
+        {
+            let mut guard = node
+                .write()
+                .map_err(|_| anyhow::anyhow!("node lock poisoned"))?;
+            guard.tick_wallclock(unix_millis())?;
+        }
         let now = unix_millis();
-        let wait_ms = {
+        let next_boundary = {
             let guard = node
                 .read()
                 .map_err(|_| anyhow::anyhow!("node lock poisoned"))?;
             let slot = guard.wallclock_slot(now).unwrap_or(0);
-            let next = guard.slot_start_ms(slot + 1).unwrap_or(now + 500);
-            next.saturating_sub(now).max(1)
+            guard.slot_start_ms(slot + 1).unwrap_or(now + 500)
         };
+        let wait_ms = next_boundary.saturating_sub(now).max(1);
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_millis(wait_ms)) => {
                 let mut guard = node
@@ -367,9 +377,11 @@ async fn run_slot_loop(
                     .write()
                     .map_err(|_| anyhow::anyhow!("node lock poisoned"))?;
                 guard.handle_network_event(event)?;
-                // Drain whatever else is queued, bounded so slots stay on time.
+                // Drain whatever else is queued, bounded by count and by the
+                // next slot boundary so a burst of blocks/tx batches never
+                // makes this validator miss its own leader slot.
                 let mut processed = 1usize;
-                while processed < MAX_EVENTS_PER_TICK {
+                while processed < MAX_EVENTS_PER_TICK && unix_millis() < next_boundary {
                     match net_rx.try_recv() {
                         Ok(event) => {
                             guard.handle_network_event(event)?;

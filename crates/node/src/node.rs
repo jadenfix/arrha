@@ -1187,7 +1187,7 @@ impl Node {
     /// inclusions first, then by fee; skip transactions already included in
     /// a pending ancestor, keep each sender's nonces contiguous from the
     /// parent state, and respect the block tx-count and gas limits.
-    fn select_transactions(&mut self, slot: Slot, parent_hash: &H256) -> Vec<Transaction> {
+    fn select_transactions(&self, slot: Slot, parent_hash: &H256) -> Vec<Transaction> {
         let _mempool_span = tracing::debug_span!("mempool_select", slot).entered();
         const MAX_BLOCK_TXS: usize = 1000;
 
@@ -1202,9 +1202,10 @@ impl Node {
         let forced = self
             .mempool
             .must_include_transactions(slot, self.fee_market.base_fee);
+        // Non-destructive: transactions stay in the pool until finalized.
         let regular = self
             .mempool
-            .get_transactions(MAX_BLOCK_TXS.saturating_mul(8), u64::MAX);
+            .peek_transactions(MAX_BLOCK_TXS.saturating_mul(8));
         let mut candidates = Vec::with_capacity(forced.len() + regular.len());
         let mut seen: HashSet<H256> = HashSet::new();
         for tx in forced.into_iter().chain(regular) {

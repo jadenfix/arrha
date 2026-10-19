@@ -7,63 +7,56 @@
 [![CI](https://github.com/jadenfix/arrha/actions/workflows/ci.yml/badge.svg)](https://github.com/jadenfix/arrha/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.86%2B-orange.svg)](https://www.rust-lang.org)
-[![Crates](https://img.shields.io/badge/Crates-53-green.svg)](crates/)
 
 ---
 
-**Parallel Execution** &nbsp;&middot;&nbsp; **BFT Finality** &nbsp;&middot;&nbsp; **AI Verification** &nbsp;&middot;&nbsp; **Dual Token Economy**
+**Local validator devnet** &nbsp;&middot;&nbsp; **BFT finality** &nbsp;&middot;&nbsp; **WASM contracts**
 
 </div>
 
 ---
 
-## Measured on a local devnet
+## What works today
 
-Numbers below are **measured**, not targets: 4 validator processes on **one Apple M4
-laptop over localhost** (2026-10-18, commit `ed0961e`). Method, raw data and caveats are
-in [docs/benchmarks.md](docs/benchmarks.md); reproduce with
-`./scripts/bench/run-benchmarks.sh`.
+Arrha is the repository name; Rust packages, binaries, RPC methods, and configuration
+still use **Aether**. The runnable product is a local validator network: clients sign
+transactions, validators exchange blocks and votes, the ledger executes transfers and
+WASM contracts, and certified blocks commit finalized state to RocksDB.
 
-| | Aether local devnet (measured) |
-|---|---|
-| Slot length / block cadence | 500 ms slots; one finalized block every 1.03 s on average |
-| Time to finality (submit to final) | p50 1.6 s, p95 4.6 s, p99 6.2 s at 100 tx/s |
-| Sustained throughput | ~400 transfers/s; ~100 WASM contract calls/s (all finalized, none lost) |
-| One of four validators killed | kept finalizing (29 blocks in 30.6 s); rejoined and finalized again 1.8 s after restart |
-| BLS verification | 2,111 sig/s one at a time, 12,324 sig/s batched (5.8x) |
+| Surface | Current implementation |
+| --- | --- |
+| Validator node | VRF leader election, BLS quorum certificates, 2-chain finality, libp2p/TCP peers |
+| Execution and storage | Sequential ledger execution, Wasmtime contracts, pending branch overlays, finalized RocksDB and sparse Merkle state |
+| Client path | JSON-RPC, `aetherctl chain`, Rust SDK signed transfer/deploy/call helpers |
+| E2E validation | In-process multi-node and settlement-library journeys, plus a four-process devnet journey |
+| Separate libraries | AI mesh, TEE/VCR/KZG verification, agent/job escrow, AIC, AMM, governance, DA, QUIC, and firehose are not an assembled node settlement service |
 
-### Next to Bitcoin and Solana, with caveats
+See [architecture](docs/architecture.md) for source-level wiring and
+[testing](docs/testing.md) for what each E2E path covers. Deployment manifests and
+network presets do not establish an operating public network or production readiness.
 
-This is **not a like-for-like comparison**: Aether's column is a single-machine,
-4-validator localhost devnet with no WAN latency, no adversaries and no real users;
-Bitcoin and Solana are global production networks. It does **not** show that Aether is
-faster than Solana in production.
+## Recorded local measurements
 
-| | Aether (local devnet) | Bitcoin mainnet | Solana mainnet |
-|---|---|---|---|
-| Block / slot time | 500 ms slots, a finalized block every ~1 s | 10 min average by design[^btcwiki]; 9.7 min measured over 4,443 blocks, 2026-09-18 to 10-18[^mempool] | ~400 ms nominal[^soldocs]; 217 ms measured over the last 20,000 slots on 2026-10-18[^solrpc] |
-| Finality | deterministic, p50 1.6 s / p95 4.6 s at 100 tx/s | probabilistic; 6 confirmations (~60 min) is the common convention[^btcwiki] | "finalized" ~31 slots behind "confirmed", ~6.7 s measured 2026-10-18[^solrpc]; docs: 32 slots, ~13 s at 400 ms slots[^soldocs] |
-| Throughput | ~400 tx/s transfers on one laptop | 8.1 tx/s average (6.2 to 10.4 by day), 2026-09-18 to 10-14[^btctxs] | 1,887 non-vote tx/s (4,955 incl. votes), hour average on 2026-10-18[^solrpc] |
-| Validators / setting | 4, one machine | global | global |
+The [benchmark report](docs/benchmarks.md) records a 2026-10-18 run at commit
+`ed0961e`: four validator processes on one Apple M4 laptop over localhost.
+These are historical measurements of that revision, not fresh results for every checkout.
 
-What this shows: the code runs as a real multi-process BFT network, finalizes
-deterministically, executes WASM contracts, survives a crashed validator and lets it
-rejoin. What it does not show: behaviour over a WAN, with many validators, under
-Byzantine or adversarial load, or with real users. Aether's throughput here is capped by
-its block gas limit and by VRF leader election leaving about half of the slots without a
-finalized block, not by the hardware.
+| Metric | Recorded result |
+| --- | --- |
+| Slot / finalized block cadence | 500 ms slots; one finalized block every 1.03 s on average |
+| Submit-to-finality at 100 transfers/s | p50 1.6 s, p95 4.6 s, p99 6.2 s |
+| Sustained load before large queues | About 400 transfers/s or 100 WASM counter calls/s |
+| One validator stopped | Remaining three kept finalizing; restarted validator resumed finalization in 1.8 s |
 
-[^btcwiki]: Bitcoin Wiki, "Confirmation", https://en.bitcoin.it/wiki/Confirmation (accessed 2026-10-18).
-[^mempool]: mempool.space REST API, block at timestamp for 2026-09-18 and 2026-10-18 (heights 967,564 and 972,007), https://mempool.space/docs/api/rest (accessed 2026-10-18).
-[^btctxs]: Blockchain.com, confirmed transactions per day, https://www.blockchain.com/explorer/charts/n-transactions (30-day series ending 2026-10-14, accessed 2026-10-18).
-[^soldocs]: solana.com docs, "Transaction confirmation and expiration", https://solana.com/docs/core/transactions/confirmation (accessed 2026-10-18).
-[^solrpc]: Solana mainnet-beta public RPC (`getRecentPerformanceSamples`, `getBlockTime`, `getSlot` per commitment), queried 2026-10-18; method docs at https://solana.com/docs/rpc.
+The report includes raw artifacts, method, and limitations. It does not measure WAN
+latency, a large validator population, Byzantine load, or production usage. Reproduce
+with `./scripts/bench/run-benchmarks.sh`; that script starts and resets local devnets.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    Clients["CLI / SDKs / apps"] --> RPC["JSON-RPC<br/>WebSocket surface"]
+    Clients["aetherctl / Rust chain SDK"] --> RPC["JSON-RPC / health<br/>WebSocket surface"]
     RPC <--> Core
     subgraph Node["aether-node"]
         Core["Node coordinator<br/>Mempool + slot loop<br/>VRF / BLS / 2-chain consensus"]
@@ -81,13 +74,13 @@ See [Architecture](docs/architecture.md) for the source audit and integration bo
 ## Key Features
 
 ### Hybrid Consensus
-VRF-based leader election, HotStuff-style BFT voting and BLS aggregate signatures. Every block carries a quorum certificate (>= 2/3 stake) for its parent; a block is final when it and its child in the immediately following slot are both certified (2-chain rule; single-validator mode finalizes its own certificate). Blocks execute on in-memory pending state and are written to RocksDB only when final, so forks never corrupt state.
+VRF-based leader election, HotStuff-style BFT voting and BLS aggregate signatures. Blocks outside the genesis/bootstrap exception require a parent quorum certificate (>= 2/3 stake); a block is final when it and its child in the immediately following slot are both certified (2-chain rule; single-validator mode finalizes its own certificate). Blocks execute on in-memory pending state and are written to RocksDB only when final, so competing unfinalized branches do not overwrite finalized state.
 
 ### WASM Smart Contracts
 Wasmtime-powered VM with fuel metering, bounded memory and sandboxed execution; contracts are deployed and called with ordinary transactions and their storage is committed to the state root. A read/write-set scheduler for parallel execution exists in `crates/runtime` but block execution is currently sequential.
 
-### eUTxO++ Ledger
-Extended UTXO model combining Bitcoin's security properties with Ethereum's programmability. Deterministic fee estimation and natural parallelism.
+### Ledger
+The ledger implements account transfers, UTxO transactions, WASM deployment and calls, and fee handling. Pending blocks execute against branch overlays; finalized changes are persisted atomically. The current block execution path is sequential.
 
 ### AI Verification Pipeline
 The intended flow is AIC job escrow → TEE execution → VCR/KZG verification → challenge window → settlement. Mesh, verifier, and program libraries exist, but the node does not assemble this end-to-end flow; the old print-only AI runtime executable has been removed. See [integration boundaries](docs/architecture.md#components-outside-the-assembled-node-path).
@@ -101,12 +94,12 @@ The repository contains staking, governance, AMM, job escrow, reputation, AIC to
 ### Turbine Data Availability
 Turbine and Reed-Solomon erasure-coding libraries exist. The running node currently broadcasts whole blocks through libp2p/TCP; it does not wire these libraries into block propagation.
 
-### Full Observability
+### Observability
 The node starts a Prometheus exporter and provides structured tracing and an RPC health endpoint. Grafana deployment assets are available separately. The firehose is an in-process broadcast library, and the indexer executable has no live node connection yet.
 
 ## Quick Start
 
-**Prerequisites:** Rust 1.86+ &nbsp;|&nbsp; Python 3 (for the e2e script) &nbsp;|&nbsp; Node.js 20+ (optional, for web/SDKs)
+**Prerequisites:** current stable Rust with Cargo, a C/C++ compiler and libclang for RocksDB, Git, Bash, curl, and Python 3. Node.js 20+ and npm are optional for web/TypeScript builds. Workspace package metadata declares Rust 1.86; CI follows stable Rust. See [Getting Started](GETTING_STARTED.md) for setup.
 
 ### Run a local devnet (4 validators)
 
@@ -117,7 +110,8 @@ cd arrha
 ./scripts/devnet.sh status     # finalized slot, peers, mempool per validator
 ```
 
-`start` builds `aether-node` in release mode, generates validator keys and a shared
+`start` stops the managed devnet and **deletes its previous data directory** before
+creating a fresh chain. It builds `aether-node` in release mode, generates validator keys and a shared
 `genesis.json` (4 validators plus 256 funded devnet accounts), starts four separate
 processes that dial each other over libp2p, and waits until blocks finalize. Validator *i*
 serves JSON-RPC on `8545+i-1`, P2P on `9000+i-1` and metrics on `9100+i-1`. Logs and
@@ -126,7 +120,6 @@ per-validator consensus event logs are in `data/devnet/`.
 ```bash
 ./scripts/devnet.sh kill 3     # stop validator 3 (the other 3 keep finalizing)
 ./scripts/devnet.sh restart 3  # it rejoins and catches up
-./scripts/devnet.sh clean      # stop everything and delete the devnet data
 ```
 
 ### Accounts, transfers and a WASM contract
@@ -135,36 +128,47 @@ per-validator consensus event logs are in `data/devnet/`.
 cargo build --release -p aether-cli
 CTL=./target/release/aetherctl
 
-$CTL keys generate --out alice.json                         # new account
-$CTL chain transfer --dev 0 --to <alice-address> --amount 5000000000 --wait
-$CTL chain account <alice-address>                          # finalized and pending state
-$CTL chain deploy --key alice.json examples/contracts/counter.wat --wait   # prints the contract address
-$CTL chain call --key alice.json --contract <contract> --u64 6 --wait
-$CTL chain storage <contract>                               # {"0x636f756e74": "0x0600000000000000"}
-$CTL chain blocks --last 20                                 # explorer view: proposer, QC signers, finality
+ALICE=$($CTL keys generate --out alice.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["address"])')
+$CTL chain transfer --dev 0 --to "$ALICE" --amount 5000000000 --wait
+$CTL chain account "$ALICE"                                 # finalized and pending state
+CONTRACT=$($CTL chain deploy --key alice.json examples/contracts/counter.wat --wait | python3 -c 'import json,sys; print(json.load(sys.stdin)["contract"])')
+$CTL chain call --key alice.json --contract "$CONTRACT" --u64 6 --wait
+$CTL chain storage "$CONTRACT"                              # {"0x636f756e74": "0x0600000000000000"}
+$CTL chain blocks --last 20                                 # proposer, QC signers, finality
 ```
 
 `--dev <i>` signs with deterministic, publicly known devnet accounts funded at genesis
-(local networks only). The same flow is available from the Rust SDK
+(local networks only). Amounts are integer ledger units. The example creates `alice.json` in the current
+directory; keep the generated key if you need to reuse that account. The same flow
+is available from the Rust SDK
 (`aether_sdk::chain`: `transfer_tx`, `deploy_tx`, `call_tx`, `send_transaction`,
 `wait_for_finality`).
 
 ### End-to-end test
 
+Stop the quick-start network before the E2E journey claims the same ports.
+The launcher’s `stop` preserves its data; use `clean` separately only when you
+intend to delete that managed devnet data.
+
 ```bash
+./scripts/devnet.sh stop
 ./scripts/e2e-devnet.sh
 ```
 
-Starts 4 validators and asserts: all finalize and agree on the finalized chain; a new
+Starts 4 validators and checks initial finality on each; after the crash/rejoin
+journey it compares a common finalized block hash on validators 1 and 4. A new
 account is funded and transfers; the counter contract deploys and two calls set it to 7
 (read from a different validator); finalized blocks carry 3-of-4 quorum certificates;
-with one validator killed the rest keep finalizing; after a restart it catches up. CI configures
+with one validator killed the rest keep finalizing; after a restart it catches up.
+The script uses fixed RPC ports 8545–8548 and a disposable `data/e2e-devnet` directory,
+which it removes on exit unless `KEEP_DEVNET_DATA=1` is set. Stop any other network
+using those ports first. CI configures
 this on every pull request (`Devnet E2E` job). See [testing](docs/testing.md) for all retained E2E journeys.
 
 ### JSON-RPC
 
-Standard methods (`aeth_getSlotNumber`, `aeth_getFinalizedSlot`, `aeth_getBlockByNumber`,
-`aeth_sendRawTransaction`, ...) plus `aeth_getNodeInfo`, `aeth_getBlockSummaries`
+With a validator running, JSON-RPC provides methods including `aeth_getSlotNumber`, `aeth_getFinalizedSlot`, `aeth_getBlockByNumber`,
+`aeth_sendRawTransaction`, and `aeth_getNodeInfo`, `aeth_getBlockSummaries`
 (proposer, parent QC signers, finalized flag and times), `aeth_getTransactionStatus`,
 `aeth_sendRawTransactions`, `aeth_getPendingAccount` and `aeth_getContractStorage`.
 
@@ -192,20 +196,20 @@ crates/                 Rust workspace
   runtime/              WASM VM (wasmtime), parallel scheduler
   mempool/              Fee-priority tx pool, QoS
   p2p/                  libp2p networking
-  networking/           QUIC transport (Quinn), gossipsub
+  networking/           Separate QUIC and gossip libraries (outside node P2P path)
   da/                   Turbine, erasure coding, shreds
   crypto/               Ed25519, VRF, BLS, KES, KZG
   state/                Sparse Merkle, RocksDB, snapshots
-  programs/             Staking, governance, AMM, escrow, reputation
+  programs/             Node staking plus separate governance, AMM, escrow, AIC libraries
   verifiers/            TEE, KZG, VCR validators
-  rpc/                  JSON-RPC, gRPC firehose
+  rpc/                  Node JSON-RPC; separate in-process firehose library
   types/                Shared types (Block, Transaction, Address)
-  tools/                aetherctl, keytool, faucet, indexer, loadgen
+  tools/                aetherctl, keytool, faucet, scorecard, indexer, loadgen
 ai-mesh/               Off-chain AI libraries: router, coordinator, worker
 sdks/                  TypeScript and Python SDKs
 apps/                  Explorer and wallet
 deploy/                Docker, Helm, k8s, Terraform, Prometheus, Grafana
-scripts/               Lint, test, devnet, acceptance suites
+scripts/               Lint, E2E launcher, devnet, benchmarks
 fuzz/                  Libfuzzer targets (tx, block, merkle, VRF, WASM)
 docs/                  Architecture, security, operations
 ```
@@ -217,8 +221,8 @@ cargo build --workspace                     # Debug build
 cargo build --release                       # Release build
 ./cli-test                                # E2E journeys + real process devnet
 cargo clippy --all-targets --all-features -- -D warnings  # Lint
-./scripts/lint.sh                           # Full CI lint flow
-./scripts/test.sh                           # Full CI test flow
+./scripts/lint.sh                           # fmt, Clippy, workspace check
+./scripts/test.sh                           # Alias for ./cli-test
 ```
 
 ### CLI
@@ -239,18 +243,22 @@ cargo run -p aether-cli --bin aetherctl -- --help
 | [Runbooks](docs/ops/RUNBOOKS.md) | Operational procedures |
 | [Roadmap](IMPLEMENTATION_ROADMAP.md) | Delivery plan and milestones |
 
-## Ecosystem
+## Ecosystem and settlement design
 
-Aether is part of the [jadenfix/ecosystem](https://github.com/jadenfix/ecosystem) family of Rust-first, local-first agent infrastructure. It remains fully standalone: a complete L1 with its own consensus, runtime, ledger, SDKs, and tooling. No sibling repository is required for Aether's core value or operation.
+Arrha belongs to the [jadenfix/ecosystem](https://github.com/jadenfix/ecosystem)
+family. Its validator node runs independently of sibling repositories.
 
-Within the ecosystem, Aether's role is frontier settlement. It communicates with sibling projects through explicit protocol artifacts rather than shared internals:
+The proposed ecosystem role is settlement for agent work: signed job requests,
+receipts, verifier decisions, challenge handling, and escrow outcomes. The repository
+contains schemas and settlement libraries, with in-process library E2E coverage.
+The running node does not expose an integrated AI job API or execute the entire
+TEE → VCR → challenge → payment flow. Receipt anchoring and sibling-project
+consumers remain integration work unless a producer and consumer are implemented
+and exercised together.
 
-- **Compute settlement:** agent runtimes can submit signed jobs, receipts, verifier outputs, and challenge results through Aether's TEE + VCR verification lane, with escrow settled on-chain.
-- **Attestation anchoring:** beaterOS receipts, beater attestations, and beater-memory provenance can be anchored as transactions or events when both sides ship the matching consumer.
-- **Ecosystem read path:** tempo, beatbox, beater.js, SDKs, dashboards, and agents should consume finalized blocks, JSON-RPC responses, gRPC firehose streams, receipts, and verifier events instead of linking to node internals.
-- **Integration rule:** every connection stays opt-in and contract-bound. A roadmap-only dependency does not become part of Aether's public contract until a real producer and consumer exist on both sides.
-
-See [Agent Settlement](docs/ecosystem/aether-agent-settlement.md) for the detailed compatibility scope, gap analysis, dependency graph, and definition of done.
+Use the existing JSON-RPC and signed chain path for node integration today. See
+[Agent Settlement](docs/ecosystem/aether-agent-settlement.md) for contract scope,
+remaining integration work, and completion criteria.
 
 ## Contributing
 

@@ -1,6 +1,6 @@
 ---
 name: technical-choice
-description: Language, framework, library, runtime, data-structure, and algorithm selection for jadenfix/aether. Use when choosing what technology or algorithm to use, replacing an existing approach, optimizing for performance or adoption, or deciding whether a new dependency/framework is justified.
+description: Language, framework, library, runtime, data-structure, and algorithm selection for jadenfix/arrha. Use when choosing what technology or algorithm to use, replacing an existing approach, optimizing for performance or adoption, or deciding whether a new dependency/framework is justified.
 ---
 
 # aether technical choice
@@ -38,7 +38,7 @@ If no option clears that bar, recommend keeping the current approach and name th
 - Prove deterministic iteration order where outputs affect consensus, signatures, hashes, fees, or public API ordering.
 - Prefer streaming, bounded, or incremental algorithms for untrusted remote data.
 - Avoid probabilistic structures in consensus-visible paths unless false-positive/false-negative behavior is explicitly harmless.
-- Define boundary tests at below, at, and above every cap.
+- Exercise below, at, and above each changed cap within retained E2E journeys; use static checks and separate benchmark/fuzz tools where appropriate.
 
 ## Framework and dependency checks
 

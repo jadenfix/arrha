@@ -1,9 +1,9 @@
 ---
 name: docs-scope-review
-description: End-to-end documentation and scope iteration for jadenfix/aether. Use when writing, reviewing, or finalizing README sections, ecosystem docs, architecture docs, PR bodies, roadmaps, specs, public contracts, generated-client-facing docs, or any doc cleanup that must stay aligned with runtime behavior and repository scope.
+description: End-to-end documentation and scope iteration for jadenfix/arrha. Use when writing, reviewing, or finalizing README sections, ecosystem docs, architecture docs, PR bodies, roadmaps, specs, public contracts, generated-client-facing docs, or any doc cleanup that must stay aligned with runtime behavior and repository scope.
 ---
 
-# aether docs and scope review
+# Arrha / Aether docs and scope review
 
 Use this skill to make documentation changes complete, honest, and merge-ready. The goal is not prettier prose; the goal is a durable public contract that matches the code, PR scope, and ecosystem boundaries.
 
@@ -16,6 +16,14 @@ Use this skill to make documentation changes complete, honest, and merge-ready. 
 - Do not publish opaque integration claims. A connection exists only when a real producer and consumer exist, with a named protocol artifact between them.
 - When moving docs, rewrite links from the new location. Repo-local links should resolve in the repo; sibling-project links should use stable GitHub URLs unless the repository intentionally vendors that sibling.
 - Prefer the smallest doc set that proves the invariant. Remove stale duplicate docs instead of preserving competing sources of truth.
+
+## Current source and validation references
+
+Use `docs/architecture.md` for executable wiring, `docs/testing.md` for the E2E-only
+policy, and `.github/workflows/ci.yml` for configured CI. The repository is
+`jadenfix/arrha`; Rust packages and binaries still use Aether. Do not restore
+removed phase plans, unit/property suites, or competing overview documents.
+Historical benchmark results keep their original revisions and environments.
 
 ## Workflow
 

@@ -150,3 +150,81 @@ Payment lifecycle/operational references:
 [checked SPL transfers](https://solana.com/docs/tokens/basics/transfer-tokens),
 [Bitcoin Core releases](https://bitcoincore.org/en/download/),
 [LND payment lifecycle](https://docs.lightning.engineering/the-lightning-network/payment-lifecycle/understanding-lightning-invoices).
+
+## Native command-line journeys
+
+`npm run cli:native -- capabilities` reports the supported capability matrix.
+For machine-readable JSON output use the direct Node commands below (npm normally
+adds its own script banner). Native operations use persistent journals; keep them
+and their backups private and never erase them to bypass an uncertain payment.
+
+For Bitcoin, set `ARRHA_NATIVE_CONFIG` to an operator-owned JSON file:
+
+```json
+{"rpcUrl":"http://127.0.0.1:18443/wallet/payer","cookieFile":"/private/bitcoin/regtest/.cookie","dbPath":"/private/arrha/payments.sqlite","profile":{"network":"regtest","genesis":"<actual getblockhash 0>","confirmations":2}}
+```
+
+Create provider requests using the provider wallet's corresponding profile.
+Credential files require mode 0600. RPC transport requires HTTPS or loopback HTTP;
+credentials are read from files, never URL parameters or command arguments.
+`ARRHA_DB` can explicitly override the profile's journal path. Financial amounts
+and budgets are canonical integer strings; the Bitcoin budget includes fees.
+
+```sh
+node --experimental-sqlite src/native-cli.mjs bitcoin request terms.json > request.json
+node --experimental-sqlite src/native-cli.mjs bitcoin prepare payment-1 request.json 130000
+node --experimental-sqlite src/native-cli.mjs bitcoin broadcast payment-1
+node --experimental-sqlite src/native-cli.mjs bitcoin observe request.json
+```
+
+Bitcoin terms contain `runId`, `agreementHash` (0x-prefixed 32-byte hex),
+`amountSats` and future Unix `expiresAt`. Authenticate the provider's request
+through a trusted channel: the request checksum does not prove provider identity.
+A broadcast response is Submitted/Included; only observation under the declared
+confirmation policy can report Paid. The executed Core E2E uses these CLI commands
+with real wallets and verifies SDK restart/reorganization recovery against them.
+
+For Lightning, the profile uses `rpcUrl` (HTTPS), `certificateFile`, optional
+private binary `macaroonFile`, `dbPath`, and
+`profile: {"network":"regtest","nodeId":"<actual LND compressed public key>"}`.
+Use appropriately scoped macaroons; disabling authentication is only a local test
+fixture setting. Invoice terms contain `runId`, `agreementHash`, `amountSats` and
+optional `expirySeconds` (at most 86400). The public request output excludes the
+provider's retained invoice preimage.
+
+```sh
+node --experimental-sqlite src/native-cli.mjs lightning invoice terms.json > invoice.json
+node --experimental-sqlite src/native-cli.mjs lightning prepare payment-1 invoice.json 1234000 10
+node --experimental-sqlite src/native-cli.mjs lightning pay payment-1
+node --experimental-sqlite src/native-cli.mjs lightning observe invoice.json
+```
+
+Lightning budgets above mean at most 1,234,000 msat principal and 10 sat fee.
+Successful payment output includes the verified preimage as payment evidence;
+protect it and the receipt appropriately. The two-node LND E2E executes invoice,
+prepare, post-interruption pay recovery and observation through the CLI.
+
+For Solana, install `solana/client` dependencies and set `ARRHA_SOLANA_MANIFEST`,
+`ARRHA_SOLANA_RPC`, `ARRHA_DB` and a protected native `ARRHA_KEY_FILE` (JSON byte
+array). Use separate actor keys; each actor normally pays its transaction fee.
+Terms JSON contains a base58 `payer`, `provider`, `arbitrator`, `receiptSigner`,
+32-byte hex `runId`, `workHash`, `evidencePolicy`, integer-string `amount`, nonce
+and Unix deadlines. The manifest pins mint, decimals, bytecode, genesis and caps.
+
+```sh
+node --experimental-sqlite solana/client/cli.mjs keygen /private/new-wallet.json
+node --experimental-sqlite solana/client/cli.mjs prepare fund-1 fund terms.json
+node --experimental-sqlite solana/client/cli.mjs broadcast fund-1
+node --experimental-sqlite solana/client/cli.mjs operation fund-1
+node --experimental-sqlite solana/client/cli.mjs state terms.json
+```
+
+Other prepare actions: `accept`, `deliver`, `settle`, `dispute`, `resolve`,
+`refund`, `revoke`. Delivery takes a final hex evidence-hash argument; if its
+receipt signer differs from the provider, supply protected
+`ARRHA_RECEIPT_KEY_FILE` for that exact co-signature. Resolution takes the final
+provider split in raw units. Every prepare journals signed bytes; broadcast
+resubmits only those bytes. Operation inspection is read-only and distinguishes
+finalized, failed and expired/unknown signatures. There is no automatic blockhash
+refresh or new payment on an uncertain response. The local-validator E2E drives
+success, cancellation, revocation and arbitration through these CLI actions.

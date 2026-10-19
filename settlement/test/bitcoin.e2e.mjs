@@ -1,12 +1,14 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
+import {spawn,execFile} from 'node:child_process';
+import {promisify} from 'node:util';
 import {createServer} from 'node:net';
-import {mkdtempSync,mkdirSync,readFileSync,rmSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,readFileSync,writeFileSync,rmSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {Store} from '../src/store.mjs';
 import {BitcoinRpc,BitcoinPayments} from '../src/bitcoin.mjs';
 import {id} from 'ethers';
+const execute=promisify(execFile);
 
 test('Bitcoin Core regtest: native payments, exact satoshis, durable replay and canonical reorg recovery',{timeout:120000},async t=>{
  if(!process.env.ARRHA_BITCOIND)throw Error('Set ARRHA_BITCOIND to a verified Bitcoin Core executable');
@@ -20,18 +22,22 @@ test('Bitcoin Core regtest: native payments, exact satoshis, durable replay and 
  const mining=await payerRpc.call('getnewaddress');await rpc.call('generatetoaddress',[101,mining]);
  store=new Store(`${dir}/payments.sqlite`);const genesis=await rpc.call('getblockhash',[0]),profile={network:'regtest',genesis,confirmations:2};
  let payer=new BitcoinPayments(store,payerRpc,profile),recipient=new BitcoinPayments(store,providerRpc,profile);
- const request=await recipient.request({runId:'btc-run-1',agreementHash:id('agreed-work'),amountSats:'123456',expiresAt:Math.floor(Date.now()/1000)+3600});
- const op=await payer.preparePayment('one-payment',request,{maxSats:'130000'});
+ for(const [name,rpc] of [['payer',payerRpc],['provider',providerRpc]])writeFileSync(`${dir}/${name}.json`,JSON.stringify({rpcUrl:rpc.url,cookieFile:`${dir}/regtest/.cookie`,profile,dbPath:`${dir}/payments.sqlite`}),{mode:0o600});
+ const cli=async(owner,command,...args)=>JSON.parse((await execute(process.execPath,['--experimental-sqlite',resolve(import.meta.dirname,'../src/native-cli.mjs'),'bitcoin',command,...args],{env:{...process.env,ARRHA_NATIVE_CONFIG:`${dir}/${owner}.json`,ARRHA_DB:`${dir}/payments.sqlite`},timeout:30000,maxBuffer:100000})).stdout);
+ const quote={runId:'btc-run-1',agreementHash:id('agreed-work'),amountSats:'123456',expiresAt:Math.floor(Date.now()/1000)+3600};writeFileSync(`${dir}/terms.json`,JSON.stringify(quote));
+ const request=await cli('provider','request',`${dir}/terms.json`);writeFileSync(`${dir}/request.json`,JSON.stringify(request));
+ const op=await cli('payer','prepare','one-payment',`${dir}/request.json`,'130000');
  assert.equal(op.state,'Signed');assert.equal((await recipient.observe(request)).state,'Pending');
  // Actual broadcast with no journal status update, then restart both adapter instances.
  const raw=store.db.prepare('SELECT raw FROM btc_operations WHERE id=?').get('one-payment').raw;
  assert.equal(await payerRpc.call('sendrawtransaction',[raw]),op.txid);store.close();store=new Store(`${dir}/payments.sqlite`);
  payer=new BitcoinPayments(store,payerRpc,profile);recipient=new BitcoinPayments(store,providerRpc,profile);
- assert.equal((await payer.broadcast('one-payment')).txid,op.txid);
+ assert.equal((await cli('payer','broadcast','one-payment')).txid,op.txid);
  assert.equal((await recipient.observe(request)).state,'Pending');
  await rpc.call('generatetoaddress',[2,mining]);
  await assert.rejects(recipient.observe({...request,amountSats:'1'}));
  const paid=await recipient.observe(request);assert.equal(paid.state,'Paid');assert.equal(paid.confirmedSats,'123456');assert.equal(paid.payments.length,1);
+ assert.equal((await cli('provider','observe',`${dir}/request.json`)).state,'Paid');
  await assert.rejects(payer.preparePayment('duplicate-payment',request,{maxSats:'130000'}));
  assert.equal((await payer.preparePayment('one-payment',request,{maxSats:'130000'})).txid,op.txid);
  await assert.rejects(payer.preparePayment('tampered',{...request,amountSats:'999999'},{maxSats:'1000000'}));

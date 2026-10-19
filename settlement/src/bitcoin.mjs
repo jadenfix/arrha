@@ -9,7 +9,9 @@ export function satsToBtc(sats) {sats=BigInt(sats);if(sats<0n||sats>210000000000
 export class BitcoinRpc {
   constructor(url,cookie){this.url=url;this.cookie=cookie;}
   async call(method,params=[]) {
-    const r=await fetch(this.url,{method:'POST',signal:AbortSignal.timeout(15000),headers:{Authorization:`Basic ${Buffer.from(this.cookie).toString('base64')}`,'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});
+    let r;
+    try{r=await fetch(this.url,{method:'POST',signal:AbortSignal.timeout(15000),headers:{Authorization:`Basic ${Buffer.from(this.cookie).toString('base64')}`,'Content-Type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method,params})});}
+    catch(error){throw Error(`${method}: RPC response uncertain (${error.message})`,{cause:error});}
     // Preserve original monetary decimal lexemes. Never convert financial amounts through floats.
     const result=JSON.parse(await r.text(),(key,value,context)=>typeof value==='number'?context.source:value);
     if(result.error)throw Error(`${method}: ${result.error.message}`);if(!r.ok)throw Error(`Bitcoin RPC HTTP ${r.status}`);return result.result;

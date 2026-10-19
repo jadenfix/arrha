@@ -11,8 +11,8 @@ export const domain = m => ({name:'ArrhaEscrow',version:'1',chainId:BigInt(m.cha
 export const agreementHash = a => TypedDataEncoder.hashStruct('Agreement',agreementTypes,a);
 export const json = x => JSON.stringify(x,(_,v)=>typeof v === 'bigint' ? v.toString() : v,2);
 export const capabilities = Object.freeze({
-  evm:{payments:true,escrow:true,disputes:true,refunds:true,scopedAuthorizations:true,receiptAnchoring:true,qualification:'local contract/SDK/service/browser E2E; public deployment unqualified'},
-  solana:{payments:true,escrow:true,disputes:true,refunds:true,scopedAuthorizations:true,receiptAnchoring:true,qualification:'local-validator SDK E2E; native transaction authorization; browser/public deployment unqualified'},
+  evm:{payments:true,escrow:true,disputes:true,refunds:true,scopedAuthorizations:true,receiptAnchoring:true,qualification:'local contract/SDK/service/browser E2E; finalized strict-debit Arbitrum Sepolia SDK journeys; wallet-extension/mainnet unqualified'},
+  solana:{payments:true,escrow:true,disputes:true,refunds:true,scopedAuthorizations:true,receiptAnchoring:true,qualification:'local-validator and public-devnet SDK E2E; native transaction authorization; native browser/mainnet unqualified'},
   bitcoin:{payments:true,escrow:false,disputes:false,refunds:false,scopedAuthorizations:false,receiptAnchoring:false,qualification:'Bitcoin Core regtest SDK; no escrow; public payments unqualified'},
   lightning:{payments:true,escrow:false,disputes:false,refunds:false,scopedAuthorizations:false,receiptAnchoring:false,qualification:'two LND nodes on regtest; no escrow; public payments unqualified'}
 });

@@ -5,8 +5,10 @@ Current Arbitrum Sepolia test-USDC escrow (deployment v2):
 `arbitrum-sepolia-usdc.json` selects the current deployment and pins its source
 revision, source hash, creation transaction/block, runtime hash, asset identity,
 immutable caps and finality policy. Caps are 1 test USDC/run and 10 outstanding.
-Sourcify confirmed exact creation/runtime matching on 2026-10-19. Public v2
-payout/refund/dispute inclusion and finality are being recorded separately.
+Sourcify confirmed exact creation/runtime matching on 2026-10-19. All 12 public v2
+payout/refund/dispute actions finalized; canonical reconstruction shows three
+terminal runs and zero liabilities. The v2 journey moved 1.4 test USDC net to
+the provider, leaving cumulative payer/provider balances 17.2/2.8 test USDC.
 
 V2 adds an exact payer-debit check alongside escrow-credit and payout checks,
 rejecting tokens that charge a fee on top of the authorized amount. The old-bytecode

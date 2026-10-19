@@ -25,7 +25,7 @@ A signed receipt records a claim, not proof that an AI answer is correct.
 
 | Adapter | Executed evidence and limits |
 | --- | --- |
-| EVM escrow | Local contracts/SDK/service/browser E2E passed. Arbitrum Sepolia v1 journeys finalized; strict-debit v2 is source verified with public requalification in progress. |
+| EVM escrow | Local contracts/SDK/service/browser E2E passed. Strict-debit Arbitrum Sepolia v2 is source verified; all 12 public SDK actions finalized with exact balances and zero liabilities. |
 | Solana escrow | Local-validator and public-devnet SDK payout/refund/dispute/recovery journeys passed. Native browser and mainnet remain unqualified; the devnet upgrade authority is published. |
 | Bitcoin / Lightning | Bitcoin Core regtest and two-node LND payment/recovery journeys passed. Payments only; no escrow parity. |
 | Release | Independent security review and an explicitly approved capped real-funds pilot remain open. No mainnet deployment is qualified. |

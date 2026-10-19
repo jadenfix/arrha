@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {spawn,execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {createServer} from 'node:net';
-import {mkdtempSync,mkdirSync,readFileSync,rmSync,openSync,closeSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,readFileSync,writeFileSync,rmSync,openSync,closeSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {Store} from '../src/store.mjs';
 import {BitcoinRpc} from '../src/bitcoin.mjs';
@@ -38,8 +38,11 @@ test('two actual LND nodes and Bitcoin Core regtest: bound invoice, payment, exp
  for(const n of [payerNode,recipientNode]){let info;for(let i=0;i<200;i++){info=await n.rpc.call('GET','/v1/getinfo');if(info.synced_to_chain && Number(info.block_height)>=113)break;await pause();}assert(info.synced_to_chain,JSON.stringify({chains:info.chains,block:info.block_height,synced:info.synced_to_chain}));}
  let routes;for(let i=0;i<100;i++){try{routes=await payerNode.rpc.call('GET',`/v1/graph/routes/${recipientNode.nodeId}/1234`);if(routes.routes?.length)break;}catch{}await pause();}assert(routes?.routes?.length,'Direct channel route did not become usable');
  store=new Store(`${dir}/lightning.sqlite`);let payer=new LightningPayments(store,payerNode.rpc,{network:'regtest',nodeId:payerNode.nodeId}),recipient=new LightningPayments(store,recipientNode.rpc,{network:'regtest',nodeId:recipientNode.nodeId});
- const request=await recipient.invoice({runId:'lightning-work',agreementHash:id('work terms'),amountSats:'1234'});assert.equal((await recipient.observe(request)).state,'Pending');
- await payer.prepare('one-payment',request,{maxMsat:'1234000',maxFeeSat:'10'});
+ for(const [name,node] of [['payer',payerNode],['recipient',recipientNode]])writeFileSync(`${dir}/${name}.json`,JSON.stringify({rpcUrl:node.rpc.url,certificateFile:`${dir}/${name}/tls.cert`,profile:{network:'regtest',nodeId:node.nodeId},dbPath:`${dir}/lightning.sqlite`}),{mode:0o600});
+ const nativeCli=async(owner,command,...args)=>JSON.parse((await execute(process.execPath,['--experimental-sqlite',resolve(import.meta.dirname,'../src/native-cli.mjs'),'lightning',command,...args],{env:{...process.env,ARRHA_NATIVE_CONFIG:`${dir}/${owner}.json`,ARRHA_DB:`${dir}/lightning.sqlite`},timeout:30000,maxBuffer:100000})).stdout);
+ writeFileSync(`${dir}/terms.json`,JSON.stringify({runId:'lightning-work',agreementHash:id('work terms'),amountSats:'1234'}));
+ const request=await nativeCli('recipient','invoice',`${dir}/terms.json`);writeFileSync(`${dir}/request.json`,JSON.stringify(request));assert.equal((await recipient.observe(request)).state,'Pending');
+ await nativeCli('payer','prepare','one-payment',`${dir}/request.json`,'1234000','10');
  await assert.rejects(payer.prepare('duplicate-id',request,{maxMsat:'1234000',maxFeeSat:'10'}));
  await assert.rejects(payer.prepare('changed-amount',{...request,amountMsat:'1235000'},{maxMsat:'9999999',maxFeeSat:'10'}));
  // Execute the RPC then interrupt before recording the terminal result in the journal.
@@ -47,7 +50,7 @@ test('two actual LND nodes and Bitcoin Core regtest: bound invoice, payment, exp
  const response=await payerNode.rpc.call('POST','/v2/router/send',{payment_request:request.bolt11,fee_limit_sat:'10',timeout_seconds:10,no_inflight_updates:true,max_parts:1});assert.equal(response.status,'SUCCEEDED',JSON.stringify({status:response.status,failureReason:response.failure_reason}));
  store.close();store=new Store(`${dir}/lightning.sqlite`);payer=new LightningPayments(store,payerNode.rpc,{network:'regtest',nodeId:payerNode.nodeId});recipient=new LightningPayments(store,recipientNode.rpc,{network:'regtest',nodeId:recipientNode.nodeId});
  await assert.rejects(recipient.observe({...request,amountMsat:'1'}));
- const recovered=await payer.pay('one-payment');assert.equal(recovered.state,'Paid');assert.equal((await recipient.observe(request)).amountPaidMsat,'1234000');assert.equal((await payer.pay('one-payment')).state,'Paid');
+ const recovered=await nativeCli('payer','pay','one-payment');assert.equal(recovered.state,'Paid');assert.equal((await nativeCli('recipient','observe',`${dir}/request.json`)).amountPaidMsat,'1234000');assert.equal((await payer.pay('one-payment')).state,'Paid');
  const short=await recipient.invoice({runId:'expires',agreementHash:id('expired work'),amountSats:'1',expirySeconds:1});await new Promise(r=>setTimeout(r,1500));await assert.rejects(payer.prepare('expired',short,{maxMsat:'1000',maxFeeSat:'1'}));assert(['Expired','Canceled'].includes((await recipient.observe(short)).state));assert.equal((await recipient.observe(short)).amountPaidMsat,'0');
  const payments=await payerNode.rpc.call('GET','/v1/payments?include_incomplete=true');assert.equal(payments.payments.filter(p=>p.status==='SUCCEEDED').length,1);
  console.log(JSON.stringify({network:'regtest',paymentHash:recovered.paymentHash,amountMsat:'1234000',successfulPayments:1,duplicatePayments:0,preimageVerified:true}));

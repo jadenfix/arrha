@@ -31,6 +31,7 @@ test('Solana local validator: actual SPL-token escrow with native signatures and
  assert(programKey.publicKey.equals(PROGRAM_ID));
  for(const w of [payer,provider,arbitrator,stranger]){const sig=await connection.requestAirdrop(w.publicKey,10000000000n);await confirm(sig);console.log('Airdrop finalized',w.publicKey.toBase58());}
  writeFileSync(`${dir}/payer.json`,JSON.stringify(Array.from(payer.secretKey)),{mode:0o600});writeFileSync(`${dir}/program.json`,JSON.stringify(Array.from(programKey.secretKey)),{mode:0o600});
+ for(const [name,wallet] of [['provider',provider],['arbitrator',arbitrator]])writeFileSync(`${dir}/${name}.json`,JSON.stringify(Array.from(wallet.secretKey)),{mode:0o600});
  await execute(`${tools}/solana`,['program','deploy','--url',url,'--keypair',`${dir}/payer.json`,'--program-id',`${dir}/program.json`,'--use-rpc',resolve(import.meta.dirname,'../target/deploy/arrha_solana.so')],{timeout:180000,maxBuffer:200000,env:nativeEnv});
  console.log('Program deployed');
  const mint=await Keypair.generate();
@@ -44,6 +45,10 @@ test('Solana local validator: actual SPL-token escrow with native signatures and
  const dataKey=(await PublicKey.findProgramAddress([PROGRAM_ID.toBytes()],LOADER))[0],data=await connection.getAccountInfo(dataKey,'finalized');
  const manifest={program:PROGRAM_ID.toBase58(),mint:mint.publicKey.toBase58(),genesis:await connection.getGenesisHash(),decimals:6,maxPerRun:'10000000',maxOutstanding:'100000000',programDataHash:sha(data.data.subarray(45)).toString('hex')};
  const sdk=new SolanaSettlement(connection,manifest);await assert.rejects(send(await sdk.initialize(stranger.publicKey,10000000n,100000000n),[stranger]));await send(await sdk.initialize(payer.publicKey,10000000n,100000000n));
+ writeFileSync(`${dir}/manifest.json`,JSON.stringify(manifest));
+ const cliAs=async(owner,...args)=>JSON.parse((await execute(process.execPath,['--experimental-sqlite',resolve(import.meta.dirname,'cli.mjs'),...args],{env:{...process.env,ARRHA_SOLANA_RPC:url,ARRHA_SOLANA_MANIFEST:`${dir}/manifest.json`,ARRHA_KEY_FILE:`${dir}/${owner}.json`,ARRHA_DB:`${dir}/cli.sqlite`},timeout:30000,maxBuffer:100000})).stdout);
+ const cli=(...args)=>cliAs('payer',...args);
+ async function cliSend(id,action,t,owner='payer',extra){const file=`${dir}/${id}.terms.json`;writeFileSync(file,JSON.stringify({...t,payer:payer.publicKey.toBase58(),provider:t.provider.toBase58(),arbitrator:t.arbitrator.toBase58(),receiptSigner:t.receiptSigner.toBase58(),runId:t.runId.toString('hex'),workHash:t.workHash.toString('hex'),evidencePolicy:t.evidencePolicy.toString('hex'),amount:String(t.amount)}));const signed=await cliAs(owner,'prepare',id,action,file,...(extra===undefined?[]:[String(extra)]));assert.equal(signed.state,'Signed');assert.equal((await cliAs(owner,'broadcast',id)).signature,signed.signature);await confirm(signed.signature);return signed;}
  store=new Store(`${dir}/journal.sqlite`);let journal=new SolanaJournal(store,sdk),counter=0;
  const amount=async address=>BigInt((await connection.getTokenAccountBalance(address,'finalized')).value.amount);
  async function terms(overrides={}){counter++;const slot=await connection.getSlot('finalized'),now=Number(await connection.getBlockTime(slot));return {runId:sha(`solana-run-${counter}`),provider:provider.publicKey,arbitrator:arbitrator.publicKey,receiptSigner:provider.publicKey,amount:1000000n,workHash:sha('work'),evidencePolicy:sha('policy'),fundBy:now+60,acceptBy:now+120,deliverBy:now+180,reviewUntil:now+240,resolveBy:now+300,nonce:counter,...overrides};}
@@ -52,26 +57,27 @@ test('Solana local validator: actual SPL-token escrow with native signatures and
    await assert.rejects(new SolanaSettlement(connection,{...manifest,maxPerRun:'100000000'}).verify(),/Wrong Solana caps/);
    await assert.rejects(new SolanaSettlement(connection,{...manifest,maxOutstanding:'1000000000'}).verify(),/Wrong Solana caps/);
    const a=await terms(),before=await amount(providerTokens);
-   await durable(await sdk.fund(payer.publicKey,a));assert.equal((await sdk.inspect(payer.publicKey,a)).state,1);
+   await cliSend('cli-fund','fund',a);assert.equal((await cli('operation','cli-fund')).state,'finalized');assert.equal((await sdk.inspect(payer.publicKey,a)).state,1);
    await assert.rejects(durable(await sdk.act('accept',stranger.publicKey,payer.publicKey,a),[stranger]));
-   await durable(await sdk.act('accept',provider.publicKey,payer.publicKey,a),[provider]);
+   await cliSend('cli-accept','accept',a,'provider');
    await assert.rejects(durable(await sdk.deliver(provider.publicKey,stranger.publicKey,payer.publicKey,a,sha('evidence')),[provider,stranger]));
-   await durable(await sdk.deliver(provider.publicKey,provider.publicKey,payer.publicKey,a,sha('evidence')),[provider]);
+   await cliSend('cli-deliver','deliver',a,'provider',sha('evidence').toString('hex'));
    await assert.rejects(durable(await sdk.payout('settle',provider.publicKey,payer.publicKey,a),[provider]));
-   await durable(await sdk.payout('settle',payer.publicKey,payer.publicKey,a));assert.equal(await amount(providerTokens)-before,1000000n);
+   await cliSend('cli-settle','settle',a);assert.equal(await amount(providerTokens)-before,1000000n);
+   assert.equal((await cli('state',`${dir}/cli-fund.terms.json`)).state,5);
    await assert.rejects(durable(await sdk.payout('settle',payer.publicKey,payer.publicKey,a)));
    await assert.rejects(durable(await sdk.fund(payer.publicKey,a)));
  });
  await t.test('cancel refund and nonce revocation are enforced by actual accounts',async()=>{
-   const a=await terms(),before=await amount(payerTokens);await durable(await sdk.fund(payer.publicKey,a));await durable(await sdk.payout('refund',payer.publicKey,payer.publicKey,a));assert.equal(await amount(payerTokens),before);
-   const b=await terms();await durable(await sdk.revoke(payer.publicKey,b.nonce));await assert.rejects(durable(await sdk.fund(payer.publicKey,b)));
+   const a=await terms(),before=await amount(payerTokens);await cliSend('cli-cancel-fund','fund',a);await cliSend('cli-refund','refund',a);assert.equal(await amount(payerTokens),before);
+   const b=await terms();await cliSend('cli-revoke','revoke',b);await assert.rejects(durable(await sdk.fund(payer.publicKey,b)));
  });
  await t.test('dispute split, wrong token program, wrong payout account and unauthorized resolver',async()=>{
-   const a=await terms();await durable(await sdk.fund(payer.publicKey,a));await durable(await sdk.act('accept',provider.publicKey,payer.publicKey,a),[provider]);await durable(await sdk.deliver(provider.publicKey,provider.publicKey,payer.publicKey,a,sha('evidence')),[provider]);await durable(await sdk.act('dispute',payer.publicKey,payer.publicKey,a));
+   const a=await terms();await cliSend('cli-dispute-fund','fund',a);await cliSend('cli-dispute-accept','accept',a,'provider');await cliSend('cli-dispute-deliver','deliver',a,'provider',sha('evidence').toString('hex'));await cliSend('cli-dispute','dispute',a);
    await assert.rejects(durable(await sdk.payout('resolve',stranger.publicKey,payer.publicKey,a,1n),[stranger]));
    const wrongDestination=await sdk.payout('resolve',arbitrator.publicKey,payer.publicKey,a,500000n);wrongDestination.keys[6].pubkey=await ata(mint.publicKey,stranger.publicKey);await assert.rejects(durable(wrongDestination,[arbitrator]));
    const wrongProgram=await sdk.payout('resolve',arbitrator.publicKey,payer.publicKey,a,500000n);wrongProgram.keys[7].pubkey=SystemProgram.programId;await assert.rejects(durable(wrongProgram,[arbitrator]));
-   await durable(await sdk.payout('resolve',arbitrator.publicKey,payer.publicKey,a,500000n),[arbitrator]);assert.equal((await sdk.inspect(payer.publicKey,a)).state,7);
+   await cliSend('cli-resolve','resolve',a,'arbitrator','500000');assert.equal((await sdk.inspect(payer.publicKey,a)).state,7);
  });
  await t.test('signed funding survives restart and broadcast-response loss without a second payment',async()=>{
    const a=await terms(),ix=await sdk.fund(payer.publicKey,a),op=await journal.prepare('crash',ix,payer,[payer]);

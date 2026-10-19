@@ -49,12 +49,16 @@ try {
     const receipt=await p.waitForTransaction(op.hash,1,60000);assert.equal(receipt.status,1,`${name} reverted`);
     const status=await db.reconcile(name,p,m.finality);console.log(json({operation:name,hash:op.hash,block:receipt.blockNumber,status:status.status}));
   }
-  // Fixed, once-only top-ups leave ample headroom within the original 0.001 test ETH.
-  for(const [name,w,value] of [['provider-gas',provider,50000000000000n],['arbitrator-gas',arbitrator,25000000000000n]]) {
+  const active=await Promise.all(Object.values(plan.runs).map(async r=>Number((await sdk.inspect(r.terms.runId)).state)));
+  // Completed plans never create another allowance or gas top-up on restart.
+  if(active.some(state=>state<5)){
+   // Fixed, once-only top-ups remain within the original 0.001 test ETH.
+   for(const [name,w,value] of [['provider-gas',provider,50000000000000n],['arbitrator-gas',arbitrator,25000000000000n]]) {
     if(db.operation(opKey(name))||await p.getBalance(w.address)<value/2n)await send(name,payer,{to:w.address,value});
+   }
+   const approval='approve-three-test-usdc';
+   if(db.operation(opKey(approval))||await t.allowance(payer.address,m.escrow)<3000000n)await send(approval,payer,await sdk.approveRequest(3000000n));
   }
-  const approval='approve-three-test-usdc';
-  if(db.operation(opKey(approval))||await t.allowance(payer.address,m.escrow)<3000000n)await send(approval,payer,await sdk.approveRequest(3000000n));
   for(const [name,r] of Object.entries(plan.runs)) {
     const run=r.terms.runId;
     const state=async()=>Number((await sdk.inspect(run)).state);

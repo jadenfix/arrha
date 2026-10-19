@@ -15,7 +15,7 @@
   "finality": "finalized",
   "maxBackfillBlocks": 100000,
   "explorer": "https://sepolia.arbiscan.io",
-  "qualification": "Strict-debit v2 exact source match; public SDK payout/refund/dispute included with exact balances and zero liabilities; parent-finality/index projection pending; independent review pending",
+  "qualification": "Strict-debit v2 exact source match; all 12 SDK actions finalized; canonical payout/refund/dispute projection and exact balances, zero liabilities; independent review pending; no real funds",
   "deploymentVersion": 2,
   "sourceRevision": "6f4193e25ca3d7d62f8184d6cbfbe37828f0df21",
   "escrowSourceSha256": "271b6e6ca363cd9ea7ee6b174ec7ef19dfe3347c6a624e013a7744553554fde7",

@@ -4,15 +4,17 @@
 
 First intended public network: Arbitrum Sepolia (421614), then a separately
 reviewed Arbitrum One (42161) deployment. Off-chain agent execution. First local
-asset is a six-decimal **aTEST** fixture, not a stablecoin. Proposed public asset
-is native Circle USDC, pending an approved deployment profile, official address
-verification and issuer/proxy-risk review. No unapproved real asset is enabled.
+asset is a six-decimal **aTEST** fixture, not a stablecoin. Public test asset is Circle testnet USDC on Arbitrum Sepolia, verified against
+Circle's official address list and live bytecode/decimals. Native mainnet USDC
+still needs an approved operating profile and issuer/proxy-risk review. No real
+asset is enabled.
 Solana escrow and Bitcoin/Lightning payments have separately exercised local
 adapters; see native-adapters.md for the exact capability and qualification limits. Arrha's original L1 remains optional and untouched.
 
 No bridge, new Arrha token, contract upgrades, fee-taking admin, arbitrary
-execution, relayer custody or gas sponsorship. Pilot deployment caps are 10
-whole fixture units/run and 100 outstanding; real-funds limits and gas budget
+execution, relayer custody or gas sponsorship. Local fixture caps are 10
+whole fixture units/run and 100 outstanding; the public test-USDC deployment is
+capped at 1/run and 10 outstanding. Real-funds limits and gas budget
 must be explicitly recorded before that gate. The constructor validates the
 asset's code/decimals. Exact incoming balance change rejects transfer-fee tokens.
 Rebasing, malicious, fee-on-transfer, transfer-hook and variable-balance tokens
@@ -25,7 +27,7 @@ The indexer uses `finalized`, rather than an arbitrary number of confirmations.
 Withdrawals to Ethereum have their own rollup challenge/delay behavior; Arrha
 escrow itself neither bridges nor accelerates withdrawals. Pilot costs include
 contract creation and approval/funding/accept/delivery/settlement transactions;
-public cost measurement is pending, not inferred from local gas receipts.
+public receipts record measured costs separately from local gas receipts.
 
 References: [Arbitrum chain profiles](https://docs.arbitrum.io/chain-info),
 [EIP-712](https://eips.ethereum.org/EIPS/eip-712),

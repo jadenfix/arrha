@@ -12,8 +12,8 @@ Executed receipts and exact source revisions accompany release evidence separate
 | Canonical indexing | Restart, duplicate logs, real Anvil snapshot/revert and RPC unavailability exercised; full pilot replay has explicit bounds |
 | Browser two-wallet journey | Payer/provider and independent arbitrator browser paths exercised locally; no wallet-extension/hardware-wallet qualification |
 | Recovery for unknown wallet response | Fail-closed pending intent; lost-hash sender/nonce/calldata recovery exercised in browser, bounded to 1,000 blocks |
-| Adversarial token/security | Local fee-token rejection, failed-transfer rollback, reentrancy rejection, donation accounting and caps exercised; independent static/security review pending |
-| Public testnet | Arbitrum Sepolia funded through free faucets; capped test-USDC escrow deployed; Sourcify exact source/creation/runtime match; public journey execution/finality being recorded |
+| Adversarial token/security | Local fee-token rejection, failed-transfer rollback, reentrancy rejection, donation accounting and caps exercised; Slither 0.11.6 executed (87 reports including dependencies; triage recorded); independent security review pending |
+| Public testnet | Arbitrum Sepolia funded through free faucets; capped test-USDC escrow deployed; Sourcify exact source/creation/runtime match; three public SDK journeys reached Settled/Refunded/Resolved with exact balances and zero liabilities; parent-finality/index projection still pending |
 | Capped mainnet pilot | Funding approval, reviewed asset, independent review, verified public deployment, operating/custody controls and reconciled pilot pending |
 | Solana | Native SPL-token escrow + SDK/journal local-validator E2E passed: payout, refund, dispute, bad signer/destination/program, revocation, recovery and deadlines; browser, devnet, review and mainnet pending |
 | Bitcoin on-chain and Lightning | Bitcoin Core regtest payment/reorg/recovery E2E and two-node LND payment/expiry/recovery E2E passed; public test-network qualification pending; no escrow parity advertised |

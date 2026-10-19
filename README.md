@@ -1,8 +1,8 @@
 <div align="center">
 
-# Aether
+# Arrha / Aether
 
-**A Rust-first L1 blockchain with AI-native verification, WASM smart contracts, and BFT finality.**
+**A Rust-first L1 prototype with WASM smart contracts and BFT finality, plus separate libraries for AI verification and agent settlement.**
 
 [![CI](https://github.com/jadenfix/arrha/actions/workflows/ci.yml/badge.svg)](https://github.com/jadenfix/arrha/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -62,53 +62,26 @@ finalized block, not by the hardware.
 ## Architecture
 
 ```mermaid
-flowchart TB
-    subgraph interface [Interface Layer]
-        RPC["JSON-RPC / gRPC Firehose"]
-        SDK["Rust / TypeScript / Python SDKs"]
-        CLI["aetherctl CLI"]
-        Apps["Explorer / Wallet"]
+flowchart LR
+    Clients["CLI / SDKs / apps"] --> RPC["JSON-RPC<br/>WebSocket surface"]
+    RPC <--> Core
+    subgraph Node["aether-node"]
+        Core["Node coordinator<br/>Mempool + slot loop<br/>VRF / BLS / 2-chain consensus"]
+        Core <--> Ledger["Ledger + Wasmtime<br/>Sequential execution<br/>Pending branch overlays"]
+        Core -->|finality| Store["Atomic finalized commit<br/>RocksDB + sparse Merkle"]
+        Ledger --> Store
+        Core -. instrumentation .-> Metrics["Prometheus exporter"]
     end
-
-    subgraph core [Node Core]
-        Mempool["Mempool\n(fee-priority, QoS)"]
-        Consensus["Hybrid Consensus\n(VRF + HotStuff + BLS)"]
-        Runtime["Parallel WASM Runtime\n(wasmtime, R/W sets)"]
-        Ledger["eUTxO++ Ledger"]
-        State["Sparse Merkle State\n(RocksDB)"]
-    end
-
-    subgraph network [Network and Data Plane]
-        P2P["libp2p / gossipsub"]
-        QUIC["QUIC Transport (Quinn)"]
-        Turbine["Turbine DA\n(RS Erasure Coding)"]
-    end
-
-    subgraph ai [AI Verification]
-        TEE["TEE Attestation"]
-        VCR["Verifiable Compute (VCR)"]
-        KZG["KZG Commitments"]
-        Mesh["AI Mesh\n(Router / Coordinator / Workers)"]
-    end
-
-    subgraph ops [Operations]
-        Metrics["Prometheus / Grafana"]
-        Indexer["Indexer / Firehose"]
-        Deploy["Docker / Helm / k8s / Terraform"]
-    end
-
-    interface --> core
-    core --> network
-    core --> ai
-    core --> ops
-    network --> core
-    ai --> core
+    Core <--> P2P["libp2p TCP<br/>Noise / Yamux / gossipsub"]
+    P2P <--> Peers["Other validators"]
 ```
+
+See [Architecture](docs/architecture.md) for the source audit and integration boundaries.
 
 ## Key Features
 
 ### Hybrid Consensus
-VRF-based leader election, HotStuff-style BFT voting and BLS aggregate signatures. Every block carries a quorum certificate (>= 2/3 stake) for its parent; a block is final when it and its child in the next slot are both certified (2-chain rule). Blocks execute on in-memory pending state and are written to RocksDB only when final, so forks never corrupt state.
+VRF-based leader election, HotStuff-style BFT voting and BLS aggregate signatures. Every block carries a quorum certificate (>= 2/3 stake) for its parent; a block is final when it and its child in the immediately following slot are both certified (2-chain rule; single-validator mode finalizes its own certificate). Blocks execute on in-memory pending state and are written to RocksDB only when final, so forks never corrupt state.
 
 ### WASM Smart Contracts
 Wasmtime-powered VM with fuel metering, bounded memory and sandboxed execution; contracts are deployed and called with ordinary transactions and their storage is committed to the state root. A read/write-set scheduler for parallel execution exists in `crates/runtime` but block execution is currently sequential.
@@ -117,19 +90,19 @@ Wasmtime-powered VM with fuel metering, bounded memory and sandboxed execution; 
 Extended UTXO model combining Bitcoin's security properties with Ethereum's programmability. Deterministic fee estimation and natural parallelism.
 
 ### AI Verification Pipeline
-End-to-end verifiable AI compute: jobs escrowed with AIC tokens, executed in TEEs, verified via VCR proofs with KZG polynomial commitments, and settled on-chain with challenge windows.
+The intended flow is AIC job escrow → TEE execution → VCR/KZG verification → challenge window → settlement. Mesh, verifier, and program libraries exist, but the node does not assemble this end-to-end flow; the old print-only AI runtime executable has been removed. See [integration boundaries](docs/architecture.md#components-outside-the-assembled-node-path).
 
 ### Dual Token Economy
-**SWR** for staking, governance, and validator rewards. **AIC** for AI compute credits, job escrow, and mesh worker payments. On-chain AMM for seamless exchange.
+The token design assigns **SWR** to staking, governance, and validator rewards, and **AIC** to compute credits, job escrow, and worker payments. AIC and AMM libraries exist separately; this does not establish live exchange or AI settlement through the node.
 
 ### On-Chain Programs
-Staking, governance, AMM, job escrow, reputation scoring, AIC token, and account abstraction -- all built as native system programs.
+The repository contains staking, governance, AMM, job escrow, reputation, AIC token, and account abstraction libraries. Staking is used by the node; the ledger transaction path handles transfers, UTxOs, and WASM deploy/call, rather than dispatching all these libraries as native programs.
 
 ### Turbine Data Availability
-Reed-Solomon erasure-coded block propagation inspired by Solana's Turbine. Shred-based distribution for high throughput and fault tolerance.
+Turbine and Reed-Solomon erasure-coding libraries exist. The running node currently broadcasts whole blocks through libp2p/TCP; it does not wire these libraries into block propagation.
 
 ### Full Observability
-Prometheus metrics, Grafana dashboards, structured tracing spans, health check endpoints, and gRPC firehose for real-time indexing.
+The node starts a Prometheus exporter and provides structured tracing and an RPC health endpoint. Grafana deployment assets are available separately. The firehose is an in-process broadcast library, and the indexer executable has no live node connection yet.
 
 ## Quick Start
 
@@ -185,8 +158,8 @@ $CTL chain blocks --last 20                                 # explorer view: pro
 Starts 4 validators and asserts: all finalize and agree on the finalized chain; a new
 account is funded and transfers; the counter contract deploys and two calls set it to 7
 (read from a different validator); finalized blocks carry 3-of-4 quorum certificates;
-with one validator killed the rest keep finalizing; after a restart it catches up. CI runs
-this on every pull request (`Devnet E2E` job).
+with one validator killed the rest keep finalizing; after a restart it catches up. CI configures
+this on every pull request (`Devnet E2E` job). See [testing](docs/testing.md) for all retained E2E journeys.
 
 ### JSON-RPC
 
@@ -212,7 +185,7 @@ See [docs/benchmarks.md](docs/benchmarks.md).
 ## Project Structure
 
 ```
-crates/                 Rust workspace (53 crates)
+crates/                 Rust workspace
   node/                 Validator binary (entry point)
   consensus/            VRF-PoS + HotStuff + BLS aggregation
   ledger/               eUTxO++ state transitions
@@ -228,7 +201,7 @@ crates/                 Rust workspace (53 crates)
   rpc/                  JSON-RPC, gRPC firehose
   types/                Shared types (Block, Transaction, Address)
   tools/                aetherctl, keytool, faucet, indexer, loadgen
-ai-mesh/               Off-chain AI: router, coordinator, workers
+ai-mesh/               Off-chain AI libraries: router, coordinator, worker
 sdks/                  TypeScript and Python SDKs
 apps/                  Explorer and wallet
 deploy/                Docker, Helm, k8s, Terraform, Prometheus, Grafana
@@ -242,7 +215,7 @@ docs/                  Architecture, security, operations
 ```bash
 cargo build --workspace                     # Debug build
 cargo build --release                       # Release build
-cargo test --all-features --workspace       # Run the full test suite
+./cli-test                                # E2E journeys + real process devnet
 cargo clippy --all-targets --all-features -- -D warnings  # Lint
 ./scripts/lint.sh                           # Full CI lint flow
 ./scripts/test.sh                           # Full CI test flow

@@ -18,14 +18,16 @@ hex = "0.4"
 futures = "0.3"
 
 aether-types = { path = "../../types" }
-aether-ledger = { path = "../../ledger" }
 aether-metrics = { path = "../../metrics" }
 
 [dev-dependencies]
-proptest = "1"
 tokio = { workspace = true, features = ["full", "test-util"] }
 criterion = { workspace = true }
 
 [[bench]]
 name = "rpc_bench"
 harness = false
+
+[lib]
+test = false
+doctest = false

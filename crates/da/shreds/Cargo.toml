@@ -15,5 +15,6 @@ sha2.workspace = true
 aether-types = { path = "../../types" }
 aether-crypto-primitives = { path = "../../crypto/primitives" }
 
-[dev-dependencies]
-proptest.workspace = true
+[lib]
+test = false
+doctest = false

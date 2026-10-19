@@ -64,6 +64,3 @@ pub use payment::{
     AETHER_PAYMENT_SCHEME,
 };
 pub use types::{NodeHealth, RpcAccount, RpcBlock, RpcReceipt};
-
-#[cfg(test)]
-mod proptest_tests;

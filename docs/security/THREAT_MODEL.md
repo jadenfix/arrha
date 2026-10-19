@@ -1,5 +1,13 @@
 # Aether Blockchain - Security Threat Model
 
+> Scope checked 2026-10-18: this is threat-model/design guidance, not an audit
+> certificate or a list of fully integrated services. Current executable wiring
+> is in [architecture](../architecture.md); executed checks must be reported
+> separately. The maintained test suite is [E2E-only](../testing.md). Historical
+> unit/property/vector-test references below are requirements or prior evidence,
+> not current runnable test targets. AI workers and remote signers require their
+> own implementation/deployment evidence.
+
 **Version**: 1.0  
 **Date**: October 13, 2025  
 **Methodology**: STRIDE + LINDDUN

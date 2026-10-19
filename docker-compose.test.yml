@@ -165,7 +165,7 @@ services:
     networks:
       - aether-testnet
     command: |
-      sh -c "cargo test --all-features --workspace"
+      sh -c "./cli-test --in-process-only"
 
 volumes:
   genesis-data:

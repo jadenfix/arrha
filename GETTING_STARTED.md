@@ -1,158 +1,81 @@
-# Getting Started
+# Getting started with Arrha / Aether
 
-This guide takes a contributor from clone to a running node, a local multi-node environment, and the validation commands that mirror the current GitHub Actions workflow.
+Requires Rust 1.86 or newer, Git, and Python 3 for the devnet E2E script.
+Node.js 20+ and npm are needed for the web workspace build. Docker is optional.
 
-## Prerequisites
-
-Required:
-
-- Rust stable toolchain
-- Git
-
-Recommended:
-
-- Docker and Docker Compose for the Compose-based test environment
-- Node.js 20+ and `npm` if you plan to work on the TypeScript SDK or web applications
-
-## 1. Clone and Build
+## Build and run
 
 ```bash
-git clone https://github.com/jadenfix/deets.git
-cd deets
-
+git clone https://github.com/jadenfix/arrha.git
+cd arrha
 cargo build --workspace
+cargo run -p aether-node --bin aether-node
 ```
 
-## 2. Run a Single Node
+The single-validator default uses the devnet preset, data under `data/node1`,
+JSON-RPC on `127.0.0.1:8545`, P2P TCP on port 9000, and metrics on port 9090.
+A validator key is generated if absent. Stop with Ctrl-C.
 
 ```bash
-cargo run -p aether-node
+curl -sf http://127.0.0.1:8545/health
 ```
 
-Default behavior:
-
-- Uses the `devnet` chain preset unless `AETHER_CONFIG_PATH` or `AETHER_NETWORK` overrides it.
-- Stores data under `./data/node1`.
-- Generates a validator key at `./data/node1/validator.key` if one does not already exist.
-- Starts JSON-RPC on `127.0.0.1:8545`.
-- Starts the P2P listener on port `9000`.
-
-Check that the node is alive:
+## Four-validator local network
 
 ```bash
-curl -s http://127.0.0.1:8545/health
-```
-
-Query the current slot:
-
-```bash
-curl -s http://127.0.0.1:8545 \
-  -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"aeth_getSlotNumber","params":[],"id":1}'
-```
-
-Stop the node with `Ctrl-C`.
-
-## 3. Run the CI-Aligned Validation Flow
-
-Lint and static checks:
-
-```bash
-./scripts/lint.sh
-```
-
-Workspace tests:
-
-```bash
-./scripts/test.sh
-```
-
-Those scripts mirror the repository’s current Rust-focused CI behavior more closely than ad hoc commands.
-
-## 4. Start a Local Multi-Node Devnet
-
-The repository includes a process-based devnet launcher:
-
-```bash
-./scripts/devnet.sh
-```
-
-What it does:
-
-- builds `aether-node` in release mode;
-- starts four local validators;
-- assigns RPC ports `8545` through `8548`;
-- assigns P2P ports `9000` through `9003`; and
-- writes logs and data under `./data/devnet/`.
-
-Useful commands:
-
-```bash
+./scripts/devnet.sh start
+./scripts/devnet.sh status
+./scripts/devnet.sh kill 3
+./scripts/devnet.sh restart 3
 ./scripts/devnet.sh stop
-./scripts/devnet.sh clean
 ```
 
-Inspect logs in `./data/devnet/node*.log`.
+The launcher builds the node and genesis ceremony, creates a common genesis,
+and starts four processes. RPC: 8545–8548; P2P: 9000–9003; metrics: 9100–9103.
+Logs and state live under `data/devnet`. `./scripts/devnet.sh clean` stops the
+network and deletes its local state; preserve anything needed before running it.
 
-**See also:**
-- **Technical Roadmap**: [`trm.md`](./trm.md) - Full 7-phase implementation plan
-- **Architecture**: [`docs/architecture.md`](./docs/architecture.md) - System design
-- **Roadmap**: [`IMPLEMENTATION_ROADMAP.md`](./IMPLEMENTATION_ROADMAP.md) - Delivery plan and milestones
-
-## 5. Run the Docker-Based Test Network
-
-The integration environment used by CI is described in `docker-compose.test.yml`.
-
-Quick path:
+## End-to-end tests and static checks
 
 ```bash
-./scripts/docker-test.sh
+./cli-test                    # in-process E2E + real four-process devnet journey
+./cli-test --in-process-only  # multi-node and agent-settlement library journeys
+./scripts/lint.sh            # formatting, Clippy, workspace check
+npm ci
+npm run build:web            # SDK and UI TypeScript builds
 ```
 
-Manual path:
+The test suite intentionally contains only E2E scenarios. Unit, property,
+doctest execution, and JS/Python unit-test runners were removed. Benchmark and
+fuzz tools remain separate developer tools. See [testing](docs/testing.md).
+
+## CLI and SDKs
 
 ```bash
-docker compose -f docker-compose.test.yml build
-docker compose -f docker-compose.test.yml up -d validator-1 validator-2 validator-3 validator-4
-docker compose -f docker-compose.test.yml run test-runner
-docker compose -f docker-compose.test.yml down
+cargo run -p aether-cli --bin aetherctl -- chain --help
+cargo run -p aether-cli --bin aetherctl -- chain info
 ```
 
-## 6. Explore the CLI and SDK Surfaces
+Use the README's transfer/deploy/call examples for the supported signed chain
+journey. The Rust SDK has matching chain helpers. TypeScript/Python job helpers
+and UI previews do not establish a deployed AI settlement service.
 
-CLI:
-
-```bash
-cargo run -p aether-cli --bin aetherctl -- --help
-```
-
-TypeScript and web workspaces:
-
-```bash
-npm install
-npm run test:ts
-```
-
-Python SDK metadata lives under `sdks/python/`, and the TypeScript SDK lives under `sdks/typescript/`.
-
-## 7. Useful Environment Variables
-
-`aether-node` supports the following inputs:
+## Node configuration
 
 | Variable | Purpose |
 | --- | --- |
-| `AETHER_NETWORK` | Selects a built-in chain preset such as `devnet`, `testnet`, or `mainnet`. |
-| `AETHER_CONFIG_PATH` | Loads a chain configuration from a TOML file instead of a preset. |
-| `AETHER_NODE_DB_PATH` | Overrides the node data directory. |
-| `AETHER_VALIDATOR_KEY` | Overrides the validator key path. |
-| `AETHER_GENESIS_PATH` | Loads multi-validator genesis JSON instead of single-validator quick-start mode. |
-| `AETHER_RPC_PORT` | Overrides the JSON-RPC port. |
-| `AETHER_P2P_PORT` | Overrides the P2P listener port. |
-| `AETHER_BOOTSTRAP_PEERS` | Comma-separated peer addresses for outbound bootstrapping. |
+| `AETHER_NETWORK` | Built-in devnet/testnet/mainnet parameter preset; not proof of a public network. |
+| `AETHER_CONFIG_PATH` | Chain TOML configuration override. |
+| `AETHER_NODE_DB_PATH` | Node database directory. |
+| `AETHER_VALIDATOR_KEY` | Validator key path. |
+| `AETHER_GENESIS_PATH` | Shared multi-validator genesis JSON. |
+| `AETHER_RPC_PORT` | JSON-RPC port. |
+| `AETHER_RPC_RATE_LIMIT` | RPC per-second rate limit. |
+| `AETHER_P2P_PORT` | P2P TCP port. |
+| `AETHER_METRICS_PORT` | Prometheus exporter port. |
+| `AETHER_BOOTSTRAP_PEERS` | Comma-separated libp2p peer addresses. |
+| `AETHER_EVENT_LOG` | Consensus event log path. |
 
-## 8. Where to Go Next
-
-- `overview.md` for the project and repository map.
-- `docs/architecture.md` for the current system design.
-- `docs/ops/RUNBOOKS.md` for operational workflows.
-- `CONTRIBUTING.md` for PR and validation expectations.
+Read [architecture](docs/architecture.md), [contributing](CONTRIBUTING.md), and
+[operations](docs/ops/RUNBOOKS.md) next. Compose/Helm/Kubernetes/Terraform files
+are separate deployment assets; the supported local E2E path uses processes.

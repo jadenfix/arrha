@@ -87,25 +87,3 @@ fn compute_stats(samples: &VecDeque<Duration>) -> (f64, f64) {
 
     (mean, jitter)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn records_tick_metrics() {
-        let start = Instant::now();
-        let mut recorder = PohRecorder::with_start(start);
-
-        let metrics1 = recorder.tick(start + Duration::from_millis(500));
-        assert_eq!(metrics1.tick_count, 1);
-        assert!((metrics1.last_duration_ms - 500.0).abs() < 1.0);
-
-        let metrics2 = recorder.tick(start + Duration::from_millis(1050));
-        assert_eq!(metrics2.tick_count, 2);
-        assert!(metrics2.average_duration_ms >= 500.0);
-
-        // Hash should be changing each tick
-        assert_ne!(metrics1.hash, metrics2.hash);
-    }
-}

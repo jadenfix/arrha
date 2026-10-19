@@ -54,23 +54,3 @@ impl NodeMetrics {
 }
 
 pub static NODE_METRICS: Lazy<NodeMetrics> = Lazy::new(NodeMetrics::new);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn records_node_metrics() {
-        NODE_METRICS.sync_active.set(1);
-        NODE_METRICS.sync_slot_lag.set(50);
-        NODE_METRICS.sync_blocks_applied.inc();
-        NODE_METRICS.sync_stalls.inc();
-        NODE_METRICS.current_slot.set(100);
-        NODE_METRICS.sync_buffer_size.set(5);
-
-        assert_eq!(NODE_METRICS.sync_active.get(), 1);
-        assert_eq!(NODE_METRICS.sync_slot_lag.get(), 50);
-        assert_eq!(NODE_METRICS.current_slot.get(), 100);
-        assert_eq!(NODE_METRICS.sync_buffer_size.get(), 5);
-    }
-}

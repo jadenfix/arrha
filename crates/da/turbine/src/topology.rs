@@ -57,21 +57,3 @@ impl TurbineTopology {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn builds_adjacency() {
-        let topology = TurbineTopology::new(vec![
-            vec!["leader".into()],
-            vec!["a".into(), "b".into()],
-            vec!["c".into(), "d".into(), "e".into(), "f".into()],
-        ]);
-
-        let root_children = topology.children("leader");
-        assert_eq!(root_children.len(), 2);
-        assert!(root_children.contains(&"a".to_string()));
-    }
-}

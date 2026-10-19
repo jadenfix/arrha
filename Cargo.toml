@@ -1,32 +1,4 @@
-# ============================================================================
-# AETHER - AI-Credits Blockchain Monorepo
-# ============================================================================
-# PURPOSE: Root workspace manifest for Aether L1 blockchain
-# 
-# SYSTEM ARCHITECTURE:
-# - Core Protocol Layer: Consensus (VRF-PoS + HotStuff) → Networking (QUIC/Turbine) → Ledger (eUTxO++) → Runtime (WASM)
-# - Economics Layer: SWR (staking token) + AIC (AI credits, burned on use)
-# - AI Mesh Layer: TEE-attested workers → VCR generation → On-chain verification → Dispute resolution
-# - Developer Layer: SDKs (TS/Python/Rust) → CLI → Explorer → Indexer
-#
-# DATA FLOW:
-# 1. User submits tx → Mempool (gossipsub 'tx' topic)
-# 2. VRF leader elected → Proposes block → Turbine sharding (RS erasure)
-# 3. Block execution: Scheduler analyzes R/W sets → Parallel WASM VM execution
-# 4. BLS vote aggregation → HotStuff finality (≥2/3 stake)
-# 5. State commitment (Sparse Merkle) → Receipts → Indexer ingestion
-#
-# AI JOB FLOW:
-# 1. User posts job (model_hash, AIC escrow) → Job Escrow contract
-# 2. Router selects provider → Provider accepts (stakes bond)
-# 3. TEE execution → VCR generation (quote + KZG commits) → On-chain submit
-# 4. Challenge window → Watchtower verification → Settlement
-#
-# SCALE TARGETS:
-# - L1: 5-20k TPS with parallel exec, 500ms slots, 2-4MB blocks
-# - L2/App-chains: IBC-like async messages for vertical scaling
-# - External DA: Celestia/Avail for data availability scaling
-# ============================================================================
+# Arrha / Aether Rust workspace. See docs/architecture.md for current wiring.
 
 [workspace]
 resolver = "2"
@@ -111,7 +83,6 @@ members = [
     "crates/tools/loadgen",
     
     # AI Mesh
-    "ai-mesh/runtime",
     "ai-mesh/router",
     "ai-mesh/coordinator",
     "ai-mesh/worker",
@@ -123,7 +94,7 @@ edition = "2021"
 rust-version = "1.86"
 license = "MIT"
 publish = false
-repository = "https://github.com/aether/aether"
+repository = "https://github.com/jadenfix/arrha"
 
 [workspace.dependencies]
 # Async runtime
@@ -148,7 +119,7 @@ subtle = "2"
 
 # Networking
 quinn = "0.11"
-libp2p = { version = "0.56", default-features = false, features = ["gossipsub", "identify", "kad", "noise", "tcp", "quic", "yamux", "macros", "tokio"] }
+libp2p = { version = "0.56", default-features = false, features = ["gossipsub", "identify", "kad", "noise", "tcp", "yamux", "macros", "tokio"] }
 
 # Storage
 rocksdb = "0.21"
@@ -171,7 +142,6 @@ tracing-subscriber = "0.3"
 prometheus = "0.14"
 
 # Testing
-proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [profile.release]

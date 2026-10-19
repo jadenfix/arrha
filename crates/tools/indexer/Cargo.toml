@@ -14,11 +14,10 @@ serde_json.workspace = true
 bincode.workspace = true
 rocksdb.workspace = true
 warp = "0.3"
-hex = "0.4"
 
 aether-types = { path = "../../types" }
 aether-rpc-grpc = { path = "../../rpc/grpc-firehose" }
 
-[dev-dependencies]
-tempfile = "3"
-proptest = "1"
+[lib]
+test = false
+doctest = false

@@ -2,22 +2,27 @@
 
 This document covers the environments that are clearly represented in the repository today: local node execution, the process-based devnet, the Compose-based test network, and the larger Compose development stack under `deploy/docker/`.
 
+The supported local E2E journey uses four processes via `scripts/e2e-devnet.sh`.
+Compose and remote deployment assets require separate qualification; CI does
+not bring up Compose. Slot progress alone is not finality: check
+`aeth_getFinalizedSlot` and peer agreement as well.
+
 ## Environment Inventory
 
 ### Single Node
 
-- Start with `cargo run -p aether-node`
+- Start with `cargo run -p aether-node --bin aether-node`
 - Default RPC endpoint: `http://127.0.0.1:8545`
 - Default health endpoint: `http://127.0.0.1:8545/health`
 - Default data path: `./data/node1`
 
 ### Local Multi-Node Devnet
 
-- Start with `./scripts/devnet.sh`
+- Start with `./scripts/devnet.sh start`
 - Logs: `./data/devnet/node*.log`
 - Data: `./data/devnet/node*/`
 
-### Compose-Based CI/Test Network
+### Optional Compose Test Assets
 
 - Defined in `docker-compose.test.yml`
 - Helper script: `./scripts/docker-test.sh`

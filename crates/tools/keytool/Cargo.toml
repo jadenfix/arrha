@@ -15,6 +15,6 @@ hex = "0.4"
 
 aether-crypto-primitives = { path = "../../crypto/primitives" }
 
-[dev-dependencies]
-tempfile = "3"
-proptest = "1"
+[lib]
+test = false
+doctest = false

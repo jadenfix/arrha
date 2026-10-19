@@ -80,10 +80,16 @@ Key trust boundaries in the current repository include:
 
 ## Evidence Available to Auditors
 
+Distinguish reusable libraries from running-node integration using
+[architecture](../architecture.md). Automated behavioral checks are E2E-only;
+unit/property/doctest and JS/Python unit suites were removed. Workflow presence
+is not an executed audit or production qualification.
+
 The repository already includes supporting material that can be used during audit preparation:
 
 - `.github/workflows/ci.yml`
-- `scripts/run_phase*_acceptance.sh`
+- `scripts/e2e-devnet.sh`
+- `docs/testing.md`
 - `scripts/lint.sh`
 - `scripts/test.sh`
 - `scripts/docker-test.sh`

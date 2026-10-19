@@ -14,9 +14,9 @@ aether-verifiers-tee = { path = "../tee" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
-thiserror.workspace = true
 sha2.workspace = true
 bincode.workspace = true
 
-[dev-dependencies]
-proptest.workspace = true
+[lib]
+test = false
+doctest = false

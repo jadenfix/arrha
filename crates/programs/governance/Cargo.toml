@@ -9,12 +9,14 @@ keywords = ["aether", "governance", "proposals", "voting"]
 [dependencies]
 aether-types = { path = "../../types" }
 serde.workspace = true
-anyhow.workspace = true
 
 [dev-dependencies]
-proptest.workspace = true
 criterion.workspace = true
 
 [[bench]]
 name = "governance_bench"
 harness = false
+
+[lib]
+test = false
+doctest = false

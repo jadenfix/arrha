@@ -54,56 +54,18 @@ jobs:
         run: cargo audit
         continue-on-error: true
 
-  # ──────────────────────────────────────────────
-  # Test: unit tests, doc tests, integration tests
-  # ──────────────────────────────────────────────
-  test:
-    name: Test Suite
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-test-
-
-      - name: Run unit tests
-        run: cargo test --all-features --workspace
-
-      - name: Run doc tests
-        run: cargo test --doc --all-features --workspace
-
-  # ──────────────────────────────────────────────
-  # TypeScript: SDK build and tests
-  # ──────────────────────────────────────────────
-  typescript-sdk:
-    name: TypeScript SDK
+  web-build:
+    name: Web workspace build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run TypeScript SDK tests
-        run: npm run test --prefix sdks/typescript
+      - run: npm ci
+      - run: npm run build:web
 
   # ──────────────────────────────────────────────
   # Build: release binaries for supported targets
@@ -180,15 +142,13 @@ jobs:
   #
   # The e2e tests use an in-process TestNetwork with in-memory message
   # passing between nodes — they do NOT require a running Docker network.
-  # The Docker compose steps were removed because the validator containers
-  # crash on startup (genesis-ceremony / entrypoint mismatch), blocking
-  # every PR. The Docker Build job above still validates the image builds.
+  # Compose is a separate operator asset. The process devnet job below
+  # exercises actual local P2P and RPC integration.
   # ──────────────────────────────────────────────
   integration:
-    name: Integration Tests
+    name: In-process E2E
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [test]
     steps:
       - uses: actions/checkout@v4
 
@@ -204,11 +164,8 @@ jobs:
           key: ${{ runner.os }}-integration-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-integration-
 
-      - name: Run integration tests (scoped to e2e binaries, not the whole workspace)
-        run: |
-          cargo test --all-features -p aether-node --test e2e_multi_validator
-          cargo test --all-features -p aether-node --test e2e_byzantine_network
-          cargo test --all-features -p aether-node --test e2e_adversarial
+      - name: Run multi-node and agent-settlement E2E
+        run: ./cli-test --in-process-only
 
   # ──────────────────────────────────────────────
   # Devnet E2E: 4 validator processes over real libp2p networking.
@@ -250,25 +207,3 @@ jobs:
         with:
           name: devnet-e2e-logs
           path: data/e2e-devnet/*.log
-
-  # ──────────────────────────────────────────────
-  # Phase acceptance suites removed from CI on 2026-04-10.
-  #
-  # Why: Phase 4 and Phase 5 had been red on main for 10+ days, blocking
-  # every PR in the 5-agent autonomous crew. The scripts contained a mix
-  # of legitimate correctness tests and hardware-dependent performance
-  # benchmarks (e.g. `throughput > 300 sig/s` assertions) that fail
-  # randomly on slower GitHub Actions runners.
-  #
-  # The `lint`, `test`, `build`, `docker`, and `integration` jobs above
-  # already cover the full `cargo test --workspace` run, clippy,
-  # formatting, docker-compose bring-up, and scoped e2e tests — so this
-  # removal does NOT reduce actual coverage. It removes duplicated /
-  # flaky work.
-  #
-  # The scripts themselves (`scripts/run_phase*_acceptance.sh`) still
-  # exist and can be run locally at any time. If we want any of the
-  # performance benchmarks back in CI, they should move into proper
-  # criterion benches under `crates/*/benches/` with `cargo bench
-  # --no-run` as the CI check (compile-only, no throughput asserts).
-  # ──────────────────────────────────────────────

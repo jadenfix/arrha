@@ -5,11 +5,10 @@
 #
 # WORKFLOW:
 # Development: make build → make test → make devnet
-# Testing: make testnet-deploy → make loadtest
-# Production: make mainnet-build → make deploy-validator
+# Validation: make test (local E2E); deployment targets require operator review
 # ============================================================================
 
-.PHONY: all build test test-ts test-python test-all clean devnet testnet docs chaos validator-deploy \
+.PHONY: all build test build-web clean devnet testnet docs chaos validator-deploy \
         bench bench-parallel bench-consensus bench-mempool bench-ledger bench-storage bench-merkle \
         bench-runtime bench-crypto bench-da bench-rpc bench-types bench-staking bench-amm bench-governance deny audit
 
@@ -24,24 +23,14 @@ build:
 dev:
 	cargo build
 
-# Run all tests
+# End-to-end test journeys
 test:
-	./cli-test --rust-only
+	./cli-test
 
-# Run TypeScript SDK tests
-test-ts:
-	cd sdks/typescript && npm ci && npm test
-
-# Run Python SDK tests
-test-python:
-	cd sdks/python && pip install -e '.[dev]' && PYTHONPATH=src python -m pytest tests/ -v
-
-# Run all tests (Rust + TypeScript + Python)
-test-all: test test-ts test-python
-
-# Run property tests
-proptest:
-	cargo test --all --features proptest -- --ignored
+# Build web workspaces (no unit-test runners)
+build-web:
+	npm ci
+	npm run build:web
 
 # Supply chain checks (cargo-deny)
 deny:
@@ -72,35 +61,31 @@ clean:
 # Local Development
 # ============================================================================
 
-# Generate validator keys
+# Generate user signing keys (validator keys come from genesis-ceremony)
 keys:
 	mkdir -p keys/
-	cargo run -p aether-keytool -- generate --out keys/validator1.json
-	cargo run -p aether-keytool -- generate --out keys/validator2.json
-	cargo run -p aether-keytool -- generate --out keys/validator3.json
-	cargo run -p aether-keytool -- generate --out keys/validator4.json
+	cargo run -p aether-cli --bin aetherctl -- keys generate --out keys/account1.json
+	cargo run -p aether-cli --bin aetherctl -- keys generate --out keys/account2.json
+	cargo run -p aether-cli --bin aetherctl -- keys generate --out keys/account3.json
+	cargo run -p aether-cli --bin aetherctl -- keys generate --out keys/account4.json
 
-# Start local 4-node devnet
-devnet: build
-	docker compose -f deploy/docker/docker-compose.yml up --build -d
+# Start/stop the supported four-process local devnet
+devnet:
+	./scripts/devnet.sh start
 
-# Stop devnet
 devnet-stop:
-	docker compose -f deploy/docker/docker-compose.yml down
+	./scripts/devnet.sh stop
 
-# View devnet logs
 devnet-logs:
-	docker compose -f deploy/docker/docker-compose.yml logs -f
+	tail -f data/devnet/node*.log
 
-# Initialize genesis
+# Generate a shared multi-validator genesis
 genesis:
-	cargo run -p aether-node -- init-genesis \
-		--config config/genesis.toml \
-		--out genesis.json
+	cargo run -p aether-node --bin genesis-ceremony -- --help
 
-# Run faucet (mint test tokens)
+# Run the local faucet request service
 faucet:
-	cargo run -p aether-faucet -- --amount 1000000 --to $(ADDR)
+	cargo run -p aether-faucet --bin server
 
 # ============================================================================
 # Testing & Benchmarking
@@ -108,9 +93,9 @@ faucet:
 
 # Run load generator
 loadtest:
-	cargo run -p aether-loadgen --release -- \
+	cargo run -p aether-loadgen --release -- run \
 		--rpc http://localhost:8545 \
-		--tps 5000 \
+		--mode transfer --rate 100 \
 		--duration 300
 
 # Run chaos tests
@@ -206,10 +191,6 @@ monitoring:
 # AI Mesh
 # ============================================================================
 
-# Build deterministic AI worker image
-ai-worker-build:
-	cd ai-mesh/runtime && docker build -t aether-ai-worker:latest .
-
 # Generate model hash
 model-hash:
 	@test -n "$(MODEL_PATH)" || (echo "MODEL_PATH is required" >&2; exit 1)
@@ -221,12 +202,8 @@ model-hash:
 
 # Check chain status
 status:
-	cargo run -p aether-cli -- status --rpc http://localhost:8545
+	cargo run -p aether-cli --bin aetherctl -- chain info
 
-# Submit transaction
-submit-tx:
-	cargo run -p aether-cli -- submit --tx $(TX_FILE)
-
-# Query block
-query-block:
-	cargo run -p aether-cli -- block --number $(BLOCK_NUM)
+# Show supported chain commands
+chain-help:
+	cargo run -p aether-cli --bin aetherctl -- chain --help

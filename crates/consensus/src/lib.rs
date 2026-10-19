@@ -1,12 +1,4 @@
-// ============================================================================
-// AETHER CONSENSUS - Full consensus implementation
-// ============================================================================
-// PURPOSE: Provides multiple consensus engines:
-// - SimpleConsensus: Round-robin for testing
-// - VRF-PoS: VRF-based leader election
-// - HotStuff: BFT consensus with BLS aggregation
-// - HybridConsensus: VRF + HotStuff + BLS (full Phase 1 integration)
-// ============================================================================
+//! VRF leader election, BLS certificates, and hybrid 2-chain consensus.
 
 use aether_crypto_vrf::VrfProof;
 pub use aether_crypto_vrf::{VrfSigner, VrfVerifier};
@@ -100,13 +92,6 @@ pub trait ConsensusEngine: Finality + Send + Sync {
         self.validate_block(block)
     }
 
-    /// Engines without a voting-based finality gadget (the round-robin
-    /// `SimpleConsensus` used in single-node tests) treat every executed
-    /// block as final immediately.
-    fn finalizes_on_execution(&self) -> bool {
-        false
-    }
-
     /// HotStuff safe-node rule: may this validator vote for `block`?
     fn safe_to_vote(&self, _block: &Block) -> bool {
         true
@@ -126,38 +111,6 @@ pub trait ConsensusEngine: Finality + Send + Sync {
     /// Hash of the most recently finalized block, for engines that know it.
     fn finalized_block(&self) -> Option<H256> {
         None
-    }
-}
-
-/// Trivial finality for testing: every slot is immediately final.
-pub struct InstantFinality {
-    finalized: Slot,
-}
-
-impl InstantFinality {
-    pub fn new() -> Self {
-        Self { finalized: 0 }
-    }
-}
-
-impl Default for InstantFinality {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Finality for InstantFinality {
-    fn check_finality(&mut self, slot: Slot) -> bool {
-        if slot > self.finalized {
-            self.finalized = slot;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn finalized_slot(&self) -> Slot {
-        self.finalized
     }
 }
 
@@ -184,55 +137,10 @@ pub fn has_quorum(voted_stake: u128, total_stake: u128) -> bool {
     }
 }
 
-pub mod hotstuff;
 pub mod hybrid;
 pub mod pacemaker;
-pub mod simple;
 pub mod slashing;
-pub mod vrf_pos;
 
-pub use hotstuff::{ConsensusAction, HotStuffConsensus, TimeoutCertificate, TimeoutVote};
 pub use hybrid::HybridConsensus;
 pub use pacemaker::Pacemaker;
-pub use simple::SimpleConsensus;
 pub use slashing::SlashingDetector;
-pub use vrf_pos::VrfPosConsensus;
-
-#[cfg(test)]
-mod proptest_tests;
-
-#[cfg(test)]
-mod finality_tests {
-    use super::*;
-
-    #[test]
-    fn instant_finality_monotonically_advances() {
-        let mut f = InstantFinality::new();
-        assert_eq!(f.finalized_slot(), 0);
-
-        assert!(f.check_finality(1));
-        assert_eq!(f.finalized_slot(), 1);
-
-        assert!(f.check_finality(5));
-        assert_eq!(f.finalized_slot(), 5);
-
-        // Slot <= finalized is not re-reported
-        assert!(!f.check_finality(3));
-        assert!(!f.check_finality(5));
-        assert_eq!(f.finalized_slot(), 5);
-    }
-
-    #[test]
-    fn instant_finality_default() {
-        let f = InstantFinality::default();
-        assert_eq!(f.finalized_slot(), 0);
-    }
-
-    #[test]
-    fn instant_finality_record_block_is_noop() {
-        let mut f = InstantFinality::new();
-        // Should not panic — default no-op
-        f.record_block(H256::zero(), H256::zero(), 1);
-        assert_eq!(f.finalized_slot(), 0);
-    }
-}

@@ -17,7 +17,7 @@ export function App() {
       minHeight: "100vh",
       fontFamily: "Inter, system-ui, -apple-system, BlinkMacSystemFont"
     }}>
-      <Card title="Network Overview" subtitle="Phase 7 rollout">
+      <Card title="Network Overview" subtitle="Local chain overview">
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: "12px" }}>
           <Metric label="Data Source" value={source === "live" ? "Live RPC" : "Mock fallback"} />
           <Metric label="Slot Time" value={`${stats.slotTimeMs} ms`} hint="p95" />

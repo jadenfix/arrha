@@ -120,7 +120,7 @@ export function App() {
       minHeight: "100vh",
       fontFamily: "Inter, system-ui, -apple-system, BlinkMacSystemFont"
     }}>
-      <Card title="Wallet Overview" subtitle="Phase 7 SDK wiring">
+      <Card title="Wallet Overview" subtitle="Transaction payload preview">
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: "12px" }}>
           <Metric label="Default Endpoint" value={client.getEndpoint()} />
           <Metric label="Network Mode" value={networkStatus} />

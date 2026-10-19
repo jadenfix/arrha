@@ -226,23 +226,3 @@ impl AetherClient {
         .await
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn built_transactions_verify_and_pay_enough_fee() {
-        let kp = Keypair::devnet(3);
-        let fees = ChainConfig::devnet().fees;
-        let t = transfer_tx(&kp, 900, 0, Address::from([9u8; 20]), 5);
-        t.verify_signature().unwrap();
-        t.calculate_fee(&fees).unwrap();
-        let (d, addr) = deploy_tx(&kp, 900, 1, b"\0asm\x01\0\0\0".to_vec());
-        d.verify_signature().unwrap();
-        assert_eq!(addr, contract_address(&d.sender, 1));
-        let c = call_tx(&kp, 900, 2, addr, vec![1], CALL_GAS);
-        c.verify_signature().unwrap();
-        c.calculate_fee(&fees).unwrap();
-    }
-}

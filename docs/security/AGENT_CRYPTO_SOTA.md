@@ -1,5 +1,13 @@
 # Aether agent cryptography SOTA report
 
+> Scope checked 2026-10-18: this is threat-model/design guidance, not an audit
+> certificate or a list of fully integrated services. Current executable wiring
+> is in [architecture](../architecture.md); executed checks must be reported
+> separately. The maintained test suite is [E2E-only](../testing.md). Historical
+> unit/property/vector-test references below are requirements or prior evidence,
+> not current runnable test targets. AI workers and remote signers require their
+> own implementation/deployment evidence.
+
 This report defines the cryptographic architecture Aether should use as the settlement layer for Beater ecosystem agents. It is written for implementation planning, not marketing. The recommendation is intentionally layered: no single primitive can simultaneously provide low-latency consensus, agent wallet authorization, long-lived identity, private tool execution, verifiable inference, and machine-web payments.
 
 ## Executive recommendation
@@ -231,23 +239,17 @@ The first implementation slice is intentionally split into standalone crates so 
 | Policy enforcement | `aether-account-abstraction` | Rejects high-risk `Send`, `Purchase`, and `Delete` operations unless the operation policy hash is FROST-approved by guardians. |
 | Settlement | `aether-program-agent-run-escrow` | Anchors run budgets, receipt hashes, journal roots, challenge windows, settlement, disputes, and refunds. |
 
-The focused e2e gate today is:
+The retained cross-library E2E gate is:
 
-```text
-cargo test -p aether-crypto-pq \
-  -p aether-agent-schema \
-  -p aether-account-abstraction \
-  -p aether-sdk \
-  -p aether-program-agent-run-escrow
+```bash
+cargo test -p aether-sdk --test agent_settlement_e2e
 ```
 
-That test set covers real ML-DSA/ML-KEM round trips, hybrid SDK identity proofs, FROST guardian verification, receipt journal inclusion proofs, payment/side-effect binding, and an SDK -> account abstraction -> escrow settlement flow.
-
-Follow-up PRs should keep the same boundary discipline:
-
-1. Add multi-language bridge conformance fixtures for beater.js, tempo, beatbox, and beater.
-2. Add benchmark targets for journal proof generation and verification at agent-run sizes expected from production traces.
-3. Add cleanup PRs that remove stale/generated files and unused modules separately from crypto behavior changes.
+It exercises SDK authorization, receipts, account policy, signatures, and escrow
+settlement. The former per-crate unit/property/vector suites were removed under
+the E2E-only policy. This gate is not a claim of hardware-attested inference,
+a remote signer, sibling integration, or deployed node settlement. PQ benchmark
+sources remain separate performance tools.
 
 ## What not to do
 

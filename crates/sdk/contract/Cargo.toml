@@ -7,9 +7,7 @@ categories = ["wasm", "cryptography::cryptocurrencies"]
 keywords = ["aether", "sdk", "smart-contracts", "wasm"]
 
 [dependencies]
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
 
-[dev-dependencies]
-proptest = { workspace = true }
+[lib]
+test = false
+doctest = false

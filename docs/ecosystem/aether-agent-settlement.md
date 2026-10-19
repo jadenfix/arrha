@@ -2,7 +2,11 @@
 
 > **This is a design document, not a roadmap.** It describes *what Aether is*, *how it fits with the sibling Beater projects*, *what must change for ecosystem compatibility*, and *how we know each piece is done*. There are no dates. **§4** is the compatibility gap analysis; **§5** is the required change set; **§6** is the dependency graph; **§8** is the Definition of Done.
 
-Aether is a Rust-first L1 with AI-verified compute (TEE + VCR), parallel WASM execution, sub-2s finality, and a dual-token economy (**SWR** staking/governance, **AIC** compute credits). Sibling projects are indexed from [jadenfix/ecosystem](https://github.com/jadenfix/ecosystem) and integrate through published protocol artifacts, SDKs, and wire contracts rather than shared local paths.
+Aether's running node supports BFT consensus and sequential WASM execution.
+Agent schema, signing/identity, account authorization, and run-escrow libraries
+exist, with in-process cross-library E2E coverage. The two-token AI economy,
+attested inference, and sibling bridges below are target integrations, not
+claims of a deployed service. See [current architecture](../architecture.md).
 
 ---
 
@@ -42,7 +46,7 @@ The sibling stack owns **execution**:
 ## 2. First-principles requirements
 
 1. **Tradable native assets.** SWR and AIC must be transferable, swappable (AMM), and usable for staking/governance without off-chain trust.
-2. **Verifiable settlement.** Payment releases only after proof or challenge-window expiry — today via VCR for inference; extended for agent steps per §5.2.
+2. **Verifiable settlement.** Payment releases only after proof or challenge-window expiry — targeting VCR for inference and agent-step receipts per §5.2.
 3. **Programmable identity.** Agents need wallets with policy (spending caps, SideEffect gates, multisig confirm) — account abstraction is the hook.
 4. **Separation of execution and settlement.** On-chain state is minimal hashes and escrow balances; full journals and traces stay off-chain (beater-agent, beater-replay, tempo-session).
 5. **Protocol integration, not source coupling.** Bridges are SDK + JSON-RPC + shared wire types; Aether does not import beater/tempo crates into consensus hot paths.
@@ -53,51 +57,23 @@ The sibling stack owns **execution**:
 
 ---
 
-## 3. Current architecture (baseline)
+## 3. Current implementation boundary
 
-```
-Clients / aetherctl / SDKs / wallet / explorer
-            |
-            v
-    JSON-RPC / gRPC firehose
-            |
-            v
-  Node -> mempool -> consensus (VRF + HotStuff + BLS) -> runtime (parallel WASM) -> ledger (eUTxO++) -> state
-            |
-            +-> P2P / QUIC / Turbine DA
-            |
-            +-> Programs: staking, governance, AMM, job-escrow, aic-token, reputation, account-abstraction
-            |
-            +-> AI mesh (router / coordinator / worker) + verifiers (TEE, KZG, VCR)
-```
+The [source-linked architecture](../architecture.md) is authoritative for the
+running node. It uses libp2p/TCP, sequential ledger execution, pending overlays,
+and atomic finalized state commits. QUIC/Turbine, remote firehose/indexing,
+attested AI service, and full native program dispatch are not assembled there.
 
-### What ships in-repo today
+Current reusable components include `crates/agent-schema`,
+`crates/programs/agent-run-escrow`, `crates/programs/account-abstraction`,
+`crates/crypto/threshold`, `crates/crypto/pq`, and Rust/TypeScript payment helpers.
+The schema and escrow work described below has therefore begun; remaining gaps
+are integration and qualification, not an absence of those types or libraries.
 
-| Area | Status |
-| --- | --- |
-| L1 protocol crates (node, consensus, ledger, runtime, p2p, da) | Substantial; devnet-ready, mainnet hardening in progress |
-| SWR / AIC token programs | Present |
-| AMM (SWR/AIC) | Present |
-| Job escrow (inference-shaped) | Present — `model_hash`, `input_hash`, `output_hash`, VCR verify |
-| AI mesh + VCR pipeline | Present |
-| Account abstraction (ERC-4337 style) | Present |
-| Genesis ceremony / mainnet launch | **Not done** — `config/genesis.toml` accounts/validators empty |
-| Ecosystem bridges (beater.js / tempo / beater / beatbox) | **Not started** — zero cross-repo references |
-
-### Current "AI-native" vs target "agent-native"
-
-| Dimension | Aether today | Beater ecosystem |
-| --- | --- | --- |
-| Unit of work | Single **inference job** | **Agent run** with many steps |
-| Verification | VCR + TEE attestation | Journal + idempotency + eval gates |
-| Side effects | N/A (hash in / hash out) | `SideEffect`: Read → Draft → Write → Send → Purchase → Delete |
-| Tooling | AI mesh workers | MCP tools, tempo act/observe, beatbox execute |
-| Quality gate | On-chain reputation + slashing | beater eval CI + `needs_review` on non-idempotent crash |
-| Discovery | JSON-RPC | beater-connect (`.well-known/beater.json`, OpenAPI, MCP) |
-
-**Compatibility does not require replacing the L1.** It requires a new **application layer** (programs + bridges + token semantics) on top of the existing chain.
-
----
+The following sections retain design requirements. Statements such as "no
+AgentRun" or "no signature envelope" describe the original gap motivating the
+proposal; those particular libraries now exist. Neither library presence nor
+cross-library E2E proves a sibling bridge or a hardware-attested settlement path.
 
 ## 4. Compatibility gap analysis
 
@@ -116,7 +92,7 @@ Clients / aetherctl / SDKs / wallet / explorer
 
 ### 4.2 What is missing (the big gaps)
 
-1. **On-chain agent primitives** — no `AgentRun`, `StepReceipt`, or `ToolCallEscrow`; only flat inference jobs.
+1. **On-chain agent primitives** — agent schema and run-escrow libraries now exist; node dispatch and full producer/consumer integration remain unqualified.
 2. **SideEffect taxonomy** — no chain-level alignment with `beater-connect::SideEffect` confirmation/idempotency rules.
 3. **Journal anchoring** — no standard to commit `run_id` + journal Merkle root + step seq for dispute resolution.
 4. **Hybrid verification** — VCR cannot cover browser clicks, MCP HTTP calls, or beatbox Wasm runs; need receipt + challenge model.
@@ -125,7 +101,7 @@ Clients / aetherctl / SDKs / wallet / explorer
 7. **Eval → reputation pipe** — beater gate outcomes do not feed on-chain scores.
 8. **Token semantics** — AIC is inference-only; agent workloads need action/session/sandbox metering.
 9. **Identity binding** — no canonical link between agent session keys and chain addresses.
-10. **Crypto agility boundary** — BLS/Ed25519/VRF are present, but agent receipts, payment proofs, and identity credentials do not yet carry versioned algorithm envelopes or post-quantum migration hooks.
+10. **Crypto agility boundary** — BLS/Ed25519/VRF are present, but agent receipts, payment proofs, and identity credentials have schema/SDK envelope and hybrid identity support; deployed integration and migration remain to be qualified.
 
 ### 4.3 What we explicitly will not put on-chain
 

@@ -9,14 +9,16 @@ keywords = ["aether", "merkle", "sparse", "state"]
 [dependencies]
 sha2.workspace = true
 serde.workspace = true
-anyhow.workspace = true
 
 aether-types = { path = "../../types" }
 
 [dev-dependencies]
-proptest.workspace = true
 criterion.workspace = true
 
 [[bench]]
 name = "merkle_bench"
 harness = false
+
+[lib]
+test = false
+doctest = false

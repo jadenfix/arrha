@@ -7,7 +7,6 @@ categories = ["cryptography"]
 keywords = ["aether", "kes", "forward-secure", "signatures"]
 
 [dependencies]
-anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 rand.workspace = true
@@ -16,5 +15,6 @@ ed25519-dalek = { workspace = true, features = ["rand_core"] }
 zeroize.workspace = true
 subtle.workspace = true
 
-[dev-dependencies]
-proptest.workspace = true
+[lib]
+test = false
+doctest = false

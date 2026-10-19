@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { sha256 } from "@noble/hashes/sha256";
+import { bytesToHex } from "@noble/hashes/utils";
 
 import type { TransactionFields } from "./types.js";
 
@@ -62,9 +63,7 @@ export class Transaction {
     for (const key of sortedKeys) {
       sorted[key] = (forHash as Record<string, unknown>)[key];
     }
-    const hash = createHash("sha256")
-      .update(JSON.stringify(sorted))
-      .digest("hex");
+    const hash = bytesToHex(sha256(new TextEncoder().encode(JSON.stringify(sorted))));
     return `0x${hash}`;
   }
 

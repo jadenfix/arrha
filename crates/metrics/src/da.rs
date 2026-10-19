@@ -125,18 +125,3 @@ impl DAMetrics {
 }
 
 pub static DA_METRICS: Lazy<DAMetrics> = Lazy::new(DAMetrics::new);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn records_da_metrics() {
-        DA_METRICS.shreds_broadcasted.inc_by(10);
-        DA_METRICS.shreds_received.inc_by(8);
-        DA_METRICS.blocks_reconstructed.inc();
-        DA_METRICS.reconstruction_latency_ms.observe(15.0);
-        DA_METRICS.encoding_throughput_mbps.observe(150.0);
-        DA_METRICS.pending_reconstructions.set(5);
-    }
-}

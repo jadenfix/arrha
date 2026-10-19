@@ -18,3 +18,9 @@ public test payer; saves terms/evidence and signed transactions before effects;
 and verifies payout/refund/dispute token balances. Preserve its journal and keys
 outside Git. Its report distinguishes included transactions from finalized ones.
 Never run it concurrently with another user of the same signers.
+
+On 2026-10-19 all 14 public SDK operations finalized. Canonical reconstruction
+shows Settled, Refunded and Resolved, with zero outstanding liabilities. The payer
+retained 18.6 test USDC; the provider received 1.4; the escrow holds zero. Restart
+reused the same operations and signer nonces without another financial effect.
+The finalized report and receipt-fee measurements accompany delivery evidence.

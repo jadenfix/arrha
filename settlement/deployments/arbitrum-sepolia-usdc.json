@@ -13,5 +13,7 @@
   "finality": "finalized",
   "maxBackfillBlocks": 100000,
   "explorer": "https://sepolia.arbiscan.io",
-  "qualification": "unreviewed test deployment; no real funds"
+  "qualification": "Source exact-match verified; public SDK payout/refund/dispute and restart journeys finalized; independent review pending; no real funds",
+  "maxPerRun": "1000000",
+  "maxOutstanding": "10000000"
 }

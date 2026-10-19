@@ -123,7 +123,9 @@ def main():
         stop(1)
         wait_for(lambda: info(3)["peers"] == 0, "seed disconnect", timeout=15)
         before = info(3)["finalizedSlot"]
-        time.sleep(6)
+        # Slots are 500ms. Keep the star disconnected for more than one
+        # 64-slot sync page, so recovery must cross a page without quorum blocks.
+        time.sleep(36)
         start(1)
         wait_for(lambda: connected_and_finalized() and info(3)["finalizedSlot"] > before,
                  "seed restart, follower reconnect, and resumed finality")

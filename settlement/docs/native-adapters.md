@@ -26,6 +26,34 @@ test accepts `ARRHA_SOLANA_DYLD_PATH=/path/to/libusb/lib` on macOS when npm stri
 `DYLD_LIBRARY_PATH` from subprocesses. The local test shortens tick count for bounded finality waits and uses deterministic
 **local-only** signer seeds. Never reuse its deploy keys with funds.
 
+The `devnet` Cargo feature selects a separate random public program ID,
+`3nf8gyJnj2aSLyeERjAysJTHCSjuBcxUA2giH8ZXS4hu`. Its operator key is outside
+Git. Build it into a separate directory so it cannot replace the local test ELF:
+
+```sh
+cargo build-sbf --manifest-path solana/Cargo.toml --features devnet \
+  --sbf-out-dir /absolute/path/to/devnet-build --jobs 2
+```
+
+`deployments/solana-devnet.preflight.json` records intended identity, image hash,
+mint, authority and measured rent. It is **not** a deployed manifest. Deploy with
+the ordinary Solana CLI using the protected public program key, payer key and a
+persistent buffer key; use `--max-len` equal to the measured ELF byte length to
+bound allocation. Retain buffer and program state after uncertain responses;
+inspect canonical deployment before retrying. Never publish CLI recovery seeds.
+After deployment verify the on-chain ProgramData image hash and authority, then
+publish a manifest with `programDataHash` and deployment signature. The upgrade
+authority remains explicitly held by the dedicated test operator.
+
+`client/public-devnet.mjs` is a prepared, separately invoked public fixture runner.
+It requires `ARRHA_PUBLIC_SOLANA=devnet`, `ARRHA_SOLANA_MANIFEST`,
+`ARRHA_TEST_KEY_DIR` and `ARRHA_PUBLIC_WORK`; it refuses a different genesis,
+program, payer or a wallet exceeding its 5 test-SOL budget. The payer covers test
+transaction fees; provider/arbitrator still provide separate native signatures.
+It journals mint/ATA/config setup and each payment before broadcasting and checks
+finalized payout, refund, split balances and zero vault liabilities. This public
+runner is unqualified until executed against the actual devnet deployment.
+
 Terms use 32-byte run/work/evidence commitments, provider/arbitrator/receipt-signer
 Pubkeys, u64 amount/nonce, i64 Unix deadlines. Native payer transaction signatures
 bind exact terms, program, accounts and recent blockhash on the intended network;

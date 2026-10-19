@@ -4,7 +4,12 @@ use anchor_spl::{
     token::{self, Mint, Token, TokenAccount, TransferChecked},
 };
 
+// The default ID belongs to deterministic, disposable local-validator fixtures.
+// Public devnet uses a separate randomly generated program key held by the operator.
+#[cfg(not(feature = "devnet"))]
 declare_id!("2iXtA8oeZqUU5pofxK971TCEvFGfems2AcDRaZHKD2pQ");
+#[cfg(feature = "devnet")]
+declare_id!("3nf8gyJnj2aSLyeERjAysJTHCSjuBcxUA2giH8ZXS4hu");
 
 #[program]
 pub mod arrha_solana {

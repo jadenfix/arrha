@@ -7,6 +7,7 @@ license = "MIT"
 crate-type = ["cdylib"]
 [features]
 default = []
+devnet = []
 no-entrypoint = []
 no-idl = []
 no-log-ix-name = []

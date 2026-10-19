@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "network": "Solana devnet",
+  "genesis": "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+  "program": "3nf8gyJnj2aSLyeERjAysJTHCSjuBcxUA2giH8ZXS4hu",
+  "mint": "D8Q4NwWQTBdDe3cTdyFtkCh3EZpiuEvP9fN3KiSVb8ZU",
+  "assetName": "aTEST fixture, not USDC; no monetary value",
+  "decimals": 6,
+  "maxPerRun": "1000000",
+  "maxOutstanding": "10000000",
+  "upgradeAuthority": "6oRGKsgso5kyNeP4apXWrt8yYSQDFCZ87bGBV1jj3aMX",
+  "expectedBinarySha256": "50f69e24809172007a32153ab2494084fecc549efddd2099f7981ef98414680a",
+  "binaryBytes": 370984,
+  "minimumProgramDataRentLamports": "1885477560",
+  "minimumBufferRentLamports": "1885436920",
+  "feature": "devnet",
+  "qualification": "Preflight only: not deployed; public journeys unexecuted; independent review pending"
+}

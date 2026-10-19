@@ -1,102 +1,34 @@
-# Contributing to Aether
+# Contributing to Arrha / Aether
 
-This document describes the current contribution expectations for the repository as it exists today. The goal is to keep changes reviewable, verifiable, and aligned with the code paths that are actually exercised in CI.
+Use a topic branch or isolated checkout. Preserve other contributors' work and
+keep changes reviewable. Rust requires 1.86+; web builds require Node.js 20+.
 
-## Development Environment
-
-Core requirements:
-
-- Rust stable toolchain. The workspace minimum supported version is `1.75`.
-- Git.
-- Docker and Docker Compose for Compose-based validation and local network flows.
-
-Optional requirements:
-
-- Node.js 20+ and `npm` if you touch `sdks/typescript`, `packages/ui`, `apps/explorer`, or `apps/wallet`.
-
-## Branching
-
-- Prefer a short-lived topic branch or a separate git worktree for each unit of work.
-- Keep one pull request focused on one change set. Do not mix protocol changes, frontend work, and documentation rewrites unless they are tightly coupled.
-- Avoid force-pushing rebased history during active review unless the PR explicitly needs it.
-
-## Validation Matrix
-
-Match the validation to the surface you change.
-
-For most Rust changes:
+## Validation
 
 ```bash
 ./scripts/lint.sh
-./scripts/test.sh
+./cli-test
+npm ci && npm run build:web  # for SDK/UI changes
 ```
 
-For Compose-based integration work:
+`./cli-test --in-process-only` runs the faster multi-node and settlement library
+journeys. The default also runs the four-process devnet with real networking,
+RPC, CLI transfers, contracts, validator failure, and recovery. See
+[testing](docs/testing.md) for the evidence boundaries.
 
-```bash
-./scripts/docker-test.sh
-```
+Add or extend an E2E journey when behavior changes. Keep the test suite focused
+on complete flows; do not reintroduce unit/property/JS/Python test runners.
+Use build checks for compile/type correctness, benchmarks for performance,
+and fuzzing as a separate exploration tool.
 
-For phase-specific changes:
+## Documentation and review
 
-```bash
-./scripts/run_phase1_acceptance.sh
-./scripts/run_phase2_acceptance.sh
-./scripts/run_phase3_acceptance.sh
-./scripts/run_phase4_acceptance.sh
-./scripts/run_phase5_acceptance.sh
-./scripts/run_phase6_acceptance.sh
-./scripts/run_phase7_acceptance.sh
-```
+Trace architecture connections from the executable entrypoint and callers.
+A crate's presence does not establish node integration or production readiness.
+Update the README, architecture, command documentation, and CI together when
+those contracts change. Keep future designs explicitly labeled.
 
-For TypeScript SDK or frontend changes:
-
-```bash
-npm run test:ts
-```
-
-If you touch deployment or operations assets, verify the relevant files directly:
-
-- `.github/workflows/ci.yml`
-- `docker-compose.test.yml`
-- `deploy/docker/docker-compose.yml`
-- `deploy/helm/`
-- `deploy/k8s/`
-- `deploy/terraform/`
-
-## Change Expectations
-
-- Add or update tests when behavior changes.
-- Update docs when commands, architecture, interfaces, or operational guidance change.
-- Keep README and getting-started material factual. Do not add aspirational claims as current capability.
-- Prefer targeted edits over broad refactors that are unrelated to the task.
-- Preserve deterministic behavior and explicit error handling in consensus, runtime, cryptography, and state-transition code.
-
-## Pull Request Checklist
-
-1. Describe the user-visible or operator-visible impact.
-2. List the commands you ran to validate the change.
-3. Call out any follow-up work or intentionally deferred items.
-4. Update documentation if the change affects setup, operation, APIs, or project status.
-5. Note any risk areas, especially for consensus, runtime, RPC, storage, or key-management paths.
-
-## Commit Style
-
-Use a concise conventional-style subject when possible:
-
-- `feat(scope): description`
-- `fix(scope): description`
-- `docs(scope): description`
-- `test(scope): description`
-- `refactor(scope): description`
-
-Useful scopes in this repository include `consensus`, `runtime`, `ledger`, `rpc`, `programs`, `ai-mesh`, `ops`, `sdk`, `ui`, and `docs`.
-
-## Documentation Standard
-
-Project documentation should:
-
-- describe the repository as it is, not as it might become;
-- cite real commands, scripts, files, and workflows from the repo;
-- distinguish between CI-validated paths and operator-driven deployment assets; and
-- stay readable for external contributors who are new to the codebase.
+PR descriptions should explain behavior, validation actually executed, and
+remaining limitations. Use conventional commit subjects such as
+`fix(consensus): ...` or `docs(architecture): ...`. Do not publish packages,
+roll out infrastructure, or merge without the relevant authorization.

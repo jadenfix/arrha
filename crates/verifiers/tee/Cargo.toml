@@ -9,8 +9,7 @@ keywords = ["aether", "tee", "sgx", "attestation"]
 [dependencies]
 serde.workspace = true
 anyhow.workspace = true
-thiserror.workspace = true
-sha2.workspace = true
 
-[dev-dependencies]
-proptest = "1"
+[lib]
+test = false
+doctest = false

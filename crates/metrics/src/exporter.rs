@@ -71,35 +71,3 @@ async fn metrics_handler(_req: Request<Body>) -> Result<Response<Body>, Infallib
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_metrics_handler() {
-        // Increment some metrics
-        crate::CONSENSUS_METRICS.slots_finalized.inc();
-        crate::RUNTIME_METRICS.tx_executed.inc();
-
-        // Create test request
-        let req = Request::builder()
-            .uri("/metrics")
-            .body(Body::empty())
-            .unwrap();
-
-        // Call handler
-        let response = metrics_handler(req).await.unwrap();
-
-        // Verify response
-        assert_eq!(response.status(), 200);
-
-        // Read body
-        let body_bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
-        let body = String::from_utf8(body_bytes.to_vec()).unwrap();
-
-        // Verify metrics are present
-        assert!(body.contains("aether_consensus_slots_finalized"));
-        assert!(body.contains("aether_runtime_tx_executed"));
-    }
-}

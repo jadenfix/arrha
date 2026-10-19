@@ -8,17 +8,13 @@ keywords = ["aether", "account-abstraction", "smart-accounts"]
 
 [dependencies]
 anyhow.workspace = true
-bincode.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
 
 aether-agent-schema = { path = "../../agent-schema" }
 aether-crypto-primitives = { path = "../../crypto/primitives" }
 aether-crypto-threshold = { path = "../../crypto/threshold" }
 aether-types = { path = "../../types" }
 
-[dev-dependencies]
-frost-ristretto255 = { version = "3.0.0", default-features = false, features = ["serialization"] }
-rand = "0.8"
-proptest = "1"
+[lib]
+test = false
+doctest = false

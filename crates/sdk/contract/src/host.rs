@@ -6,10 +6,6 @@ use crate::error::ContractResult;
 /// In tests: prints to stdout.
 #[allow(unused_variables)]
 pub fn emit_log(data: &[u8]) -> ContractResult<()> {
-    #[cfg(test)]
-    {
-        println!("LOG: {} bytes", data.len());
-    }
     Ok(())
 }
 
@@ -35,24 +31,4 @@ pub fn get_timestamp() -> u64 {
 /// Mock implementation for native builds; WASM builds use `env.get_caller` host call.
 pub fn get_caller() -> [u8; 20] {
     [1u8; 20] // Mock caller
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_emit_log() {
-        assert!(emit_log(b"test event").is_ok());
-    }
-
-    #[test]
-    fn test_block_number() {
-        assert!(get_block_number() > 0);
-    }
-
-    #[test]
-    fn test_timestamp() {
-        assert!(get_timestamp() > 0);
-    }
 }

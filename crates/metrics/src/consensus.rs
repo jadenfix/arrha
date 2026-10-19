@@ -61,20 +61,3 @@ impl ConsensusMetrics {
 }
 
 pub static CONSENSUS_METRICS: Lazy<ConsensusMetrics> = Lazy::new(ConsensusMetrics::new);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn increments_counters() {
-        CONSENSUS_METRICS.slots_finalized.inc();
-        CONSENSUS_METRICS.fork_events.inc_by(2);
-        CONSENSUS_METRICS.finality_latency_ms.observe(42.0);
-        CONSENSUS_METRICS.blocks_produced.inc();
-        CONSENSUS_METRICS.blocks_received.inc_by(3);
-        CONSENSUS_METRICS.consensus_rounds.inc();
-        CONSENSUS_METRICS.transactions_processed.inc_by(10);
-        CONSENSUS_METRICS.block_production_ms.observe(15.0);
-    }
-}

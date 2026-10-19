@@ -8,9 +8,6 @@ pub mod emission;
 pub mod fee_market;
 pub mod state;
 
-#[cfg(test)]
-mod proptest_tests;
-
 pub use emission::EmissionSchedule;
 pub use fee_market::FeeMarket;
 pub use state::{

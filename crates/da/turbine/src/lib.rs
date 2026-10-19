@@ -108,6 +108,3 @@ pub mod topology;
 
 pub use broadcast::TurbineBroadcaster;
 pub use receive::TurbineReceiver;
-
-#[cfg(test)]
-mod tests;

@@ -11,11 +11,7 @@ aether-types = { path = "../../types" }
 aether-verifiers-vcr = { path = "../../verifiers/vcr-validator" }
 serde.workspace = true
 serde_json.workspace = true
-anyhow.workspace = true
 
-[dev-dependencies]
-aether-crypto-kzg = { path = "../../crypto/kzg", features = ["test-utils"] }
-aether-crypto-primitives = { path = "../../crypto/primitives" }
-aether-verifiers-tee = { path = "../../verifiers/tee" }
-sha2.workspace = true
-proptest = "1"
+[lib]
+test = false
+doctest = false

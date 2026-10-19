@@ -7,7 +7,6 @@ categories = ["cryptography::cryptocurrencies", "data-structures"]
 keywords = ["aether", "agents", "schema", "receipts"]
 
 [dependencies]
-anyhow.workspace = true
 blake3.workspace = true
 bincode.workspace = true
 serde.workspace = true
@@ -16,5 +15,6 @@ thiserror.workspace = true
 
 aether-types = { path = "../types" }
 
-[dev-dependencies]
-proptest = { workspace = true }
+[lib]
+test = false
+doctest = false

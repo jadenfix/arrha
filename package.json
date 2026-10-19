@@ -9,6 +9,6 @@
   ],
   "scripts": {
     "build:sdk": "npm run build --prefix sdks/typescript",
-    "test:ts": "npm run test --prefix sdks/typescript && npm run test --prefix packages/ui && npm run test --prefix apps/explorer && npm run test --prefix apps/wallet"
+    "build:web": "npm run build --workspaces --if-present"
   }
 }

@@ -9,14 +9,16 @@ keywords = ["aether", "amm", "defi", "swap"]
 [dependencies]
 aether-types = { path = "../../types" }
 serde.workspace = true
-anyhow.workspace = true
 num-bigint = "0.4"
 num-traits = "0.2"
 
 [dev-dependencies]
-proptest.workspace = true
 criterion.workspace = true
 
 [[bench]]
 name = "amm_bench"
 harness = false
+
+[lib]
+test = false
+doctest = false

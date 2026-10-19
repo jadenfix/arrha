@@ -9,7 +9,6 @@ keywords = ["aether", "loadgen", "benchmarks", "testing"]
 [dependencies]
 tokio.workspace = true
 anyhow.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 bincode.workspace = true
 hex = "0.4"
@@ -19,6 +18,3 @@ aether-types = { path = "../../types" }
 aether-crypto-primitives = { path = "../../crypto/primitives" }
 aether-crypto-bls = { path = "../../crypto/bls" }
 aether-sdk = { path = "../../sdk/rust" }
-
-[dev-dependencies]
-proptest = "1"

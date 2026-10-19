@@ -1,159 +1,19 @@
 #!/usr/bin/env bash
+# End-to-end journeys only. Static checks and benchmarks have separate commands.
 set -euo pipefail
-
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
-
-usage() {
-  cat <<'EOF'
-Usage: ./cli-test [--rust-only] [--no-doc] [--help]
-
-Runs the default balanced test suite:
-  - Rust workspace tests + integration tests (doc tests by default)
-  - JS/TS workspace tests in parallel (npm run test:ts)
-  - Installs JS workspace dependencies with npm ci when node_modules is missing
-
-Options:
-  --rust-only  Run only Rust lanes and skip JS/TS tests.
-  --no-doc     Skip Rust doc tests.
-  --help       Show this help text.
-EOF
-}
-
-require_cmd() {
-  local cmd="$1"
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "Missing required command: $cmd" >&2
-    exit 1
-  fi
-}
-
-RUST_ONLY=0
-NO_DOC=0
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --rust-only)
-      RUST_ONLY=1
-      shift
-      ;;
-    --no-doc)
-      NO_DOC=1
-      shift
-      ;;
-    --help|-h)
-      usage
-      exit 0
-      ;;
-    *)
-      echo "Unknown option: $1" >&2
-      usage
-      exit 1
-      ;;
-  esac
-done
-
-require_cmd cargo
-if [[ "$RUST_ONLY" -eq 0 ]]; then
-  require_cmd npm
+case "${1:-}" in
+  --help|-h)
+    echo "Usage: ./cli-test [--in-process-only]"
+    echo "Runs multi-node and agent-settlement E2E, then the four-process devnet journey."
+    exit 0 ;;
+  ""|--in-process-only) ;;
+  *) echo "Unknown option: $1" >&2; exit 2 ;;
+esac
+[[ $# -le 1 ]] || { echo "Too many arguments" >&2; exit 2; }
+cargo test -p aether-node --test e2e_multi_validator --test e2e_byzantine_network --test e2e_adversarial
+cargo test -p aether-sdk --test agent_settlement_e2e
+if [[ "${1:-}" != --in-process-only ]]; then
+  ./scripts/e2e-devnet.sh
 fi
-
-ensure_js_deps() {
-  if [[ -d "$ROOT_DIR/node_modules" ]]; then
-    return
-  fi
-
-  if [[ ! -f "$ROOT_DIR/package-lock.json" ]]; then
-    echo "Missing package-lock.json; cannot bootstrap JS workspace dependencies." >&2
-    exit 1
-  fi
-
-  echo "Installing JS workspace dependencies with npm ci..."
-  npm ci
-}
-
-lane_names=()
-lane_pids=()
-lane_logs=()
-lane_statuses=()
-
-cleanup() {
-  local pid
-  for pid in "${lane_pids[@]:-}"; do
-    kill "$pid" 2>/dev/null || true
-  done
-}
-
-run_rust_lane() {
-  echo "[rust] Running workspace tests..."
-  cargo test --all-features --workspace
-
-  if [[ "$NO_DOC" -eq 0 ]]; then
-    echo "[rust] Running doc tests..."
-    cargo test --doc --all-features --workspace
-  else
-    echo "[rust] Skipping doc tests (--no-doc)."
-  fi
-
-  echo "[rust] Running integration tests..."
-  cargo test --test '*' --all-features
-}
-
-run_js_lane() {
-  echo "[js] Running JS/TS workspace tests..."
-  npm run test:ts
-}
-
-start_lane() {
-  local lane_name="$1"
-  local lane_fn="$2"
-  local lane_log
-
-  lane_log="$(mktemp)"
-  lane_names+=("$lane_name")
-  lane_logs+=("$lane_log")
-
-  (
-    "$lane_fn"
-  ) >"$lane_log" 2>&1 &
-
-  lane_pids+=("$!")
-}
-
-trap cleanup INT TERM
-
-echo "Starting test lanes..."
-start_lane "rust" run_rust_lane
-if [[ "$RUST_ONLY" -eq 0 ]]; then
-  ensure_js_deps
-  start_lane "js-ts" run_js_lane
-fi
-
-overall_status=0
-for i in "${!lane_pids[@]}"; do
-  if wait "${lane_pids[$i]}"; then
-    lane_statuses+=("0")
-  else
-    lane_statuses+=("$?")
-    overall_status=1
-  fi
-done
-
-for i in "${!lane_names[@]}"; do
-  echo
-  echo "===== ${lane_names[$i]} lane output ====="
-  cat "${lane_logs[$i]}"
-done
-
-echo
-echo "Test lane summary:"
-for i in "${!lane_names[@]}"; do
-  if [[ "${lane_statuses[$i]}" -eq 0 ]]; then
-    echo "  [PASS] ${lane_names[$i]}"
-  else
-    echo "  [FAIL] ${lane_names[$i]} (exit ${lane_statuses[$i]})"
-  fi
-done
-
-rm -f "${lane_logs[@]}"
-exit "$overall_status"

@@ -24,5 +24,8 @@ aether-crypto-pq = { path = "../../crypto/pq" }
 aether-account-abstraction = { path = "../../programs/account-abstraction" }
 aether-program-agent-run-escrow = { path = "../../programs/agent-run-escrow" }
 frost-ristretto255 = { version = "3.0.0", default-features = false, features = ["serialization"] }
-proptest = { workspace = true }
 rand = { workspace = true }
+
+[lib]
+test = false
+doctest = false

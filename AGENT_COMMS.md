@@ -30,7 +30,7 @@ not personally defend in a security audit.
 |---|---|---|---|---|
 | 1 | **Mira** | Senior Engineer — Correctness, Safety & Consensus | opus-4-6 | Tier 1/2/4: tx validation, double-spend, block validation, overflow, HotStuff liveness, slashing, fork choice, storage atomicity. Second pair of eyes on all crypto PRs. |
 | 2 | **Rafa** | Full-Stack Blockchain Engineer | opus-4-6 | Tier 3/6: P2P, networking, DA, Docker, CI/CD, Prometheus, Grafana, devnet doctor. |
-| 3 | **Jun**  | Quality Lead & **Default Final Gate** | opus-4-6 | PR final gate (runs tests + clippy + devnet smoke on PR branch, then merges). Tier 5: proptests, fuzz, benchmarks. **Default final-gate runner** — as of 2026-04-10 any Opus agent may merge non-own PRs; Jun is the default and drains the queue first. |
+| 3 | **Jun**  | Quality Lead & **Default Final Gate** | opus-4-6 | PR final gate (runs tests + clippy + devnet smoke on PR branch, then merges). Tier 5: E2E journeys, fuzz, benchmarks. **Default final-gate runner** — as of 2026-04-10 any Opus agent may merge non-own PRs; Jun is the default and drains the queue first. |
 | 4 | **Sam**  | Mid-Level Generalist & **Default Peer Reviewer** | sonnet-4-6 | First-pass peer review on every PR (default). Clippy, docs, SDK/RPC, well-scoped fixes from any tier. **Note (2026-04-09):** peer review is parallelized — any non-author agent may peer-review when their own queue is empty. See TASKS.md "Review Protocol Update" block. |
 | 5 | **Dr. Nikolai Vance** | Cryptography & Refactor Lead *(NEW)* | opus-4-6 | `crates/crypto/**`, `crates/verifiers/**`, cross-crate refactors, TASKS.md Tier 0. Expected to land large opinionated PRs. |
 
@@ -115,7 +115,7 @@ or `crates/crypto|crates/verifiers`) auto-triggers a
 ### Helpers (defined in `run-claude.sh`)
 
 ```bash
-source /Users/jadenfix/deets/deets/run-claude.sh
+source ./run-claude.sh
 
 ledger_append <pr> <state> <agent_id> "<msg>"
 ledger_state  <pr>           # prints last state
@@ -186,7 +186,7 @@ assignment_update <id> <new_state> "<note>"
    **Rafa** domain-reviews CI. **Jun** final-gates: runs tests +
    `docker compose up` devnet smoke. Green → merge.
 4. **Nikolai** then files follow-ups:
-   `assign 3 5 "Add proptest for BatchVerifier invariant" ...`
+   `assign 3 5 "Exercise BatchVerifier invariant through E2E" ...`
    `assign 4 5 "Update SDK docs for new BLS batch API" ...`
 
 ---
@@ -228,40 +228,23 @@ must be clean, and the devnet must come up.
 
 ---
 
-## 🐳 Continuous Testing — use Docker, run the actual chain
+## Continuous validation
 
-Every PR, before `gh pr create`:
+Before opening a PR, run:
 
 ```bash
-cargo fmt --all
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test  --workspace --all-features
-cargo test  --doc --all-features --workspace
+./cli-test
 ```
 
-**If your change touches networking, consensus, runtime, or programs,
-ALSO bring up the devnet via Docker:**
-
-```bash
-docker compose -f docker-compose.test.yml up -d
-sleep 20
-curl -sf -X POST http://localhost:8545 \
-     -H "content-type: application/json" \
-     -d '{"jsonrpc":"2.0","method":"aether_blockNumber","params":[],"id":1}'
-docker compose -f docker-compose.test.yml logs --tail=50 validator-1
-docker compose -f docker-compose.test.yml down -v
-```
-
-**"It compiles" is not "it works."** You have full Docker access; use
-it. Jun (Agent 3) will re-run the whole gate on the PR branch inside
-his worktree before approving.
-
-Crypto-touching PRs additionally run:
-
-```bash
-cargo test -p aether-crypto --features proptest -- --ignored
-cargo bench -p aether-crypto --no-run   # compile-check benches
-```
+The test suite is E2E-only. The runner covers in-process multi-node and agent
+settlement journeys plus the real four-process devnet. Extend these journeys
+for behavioral changes. Unit/property/doc-test and JS/Python unit runners were
+removed by the maintainer's request; do not reintroduce them via crew prompts.
+Use `npm ci && npm run build:web` for SDK/UI static builds. Benchmark and fuzz
+work remain separate from the automated test suite. Report actual results and
+environment boundaries using [testing](docs/testing.md).
 
 ---
 

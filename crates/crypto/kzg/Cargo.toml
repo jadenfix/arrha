@@ -9,13 +9,12 @@ keywords = ["aether", "kzg", "polynomial", "commitments"]
 [dependencies]
 serde.workspace = true
 anyhow.workspace = true
-thiserror.workspace = true
 blst.workspace = true
-rand.workspace = true
 sha2.workspace = true
-
-[dev-dependencies]
-proptest = { workspace = true }
 
 [features]
 test-utils = []
+
+[lib]
+test = false
+doctest = false

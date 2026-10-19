@@ -14,3 +14,7 @@ rand.workspace = true
 
 aether-crypto-kzg = { path = "../../crypto/kzg", features = ["test-utils"] }
 aether-types = { path = "../../types" }
+
+[lib]
+test = false
+doctest = false

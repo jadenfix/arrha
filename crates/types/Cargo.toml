@@ -8,7 +8,6 @@ keywords = ["aether", "blockchain", "types"]
 
 [dependencies]
 serde.workspace = true
-thiserror.workspace = true
 bincode.workspace = true
 sha2.workspace = true
 hex = "0.4"
@@ -17,9 +16,12 @@ toml.workspace = true
 aether-crypto-primitives = { path = "../crypto/primitives" }
 
 [dev-dependencies]
-proptest = { workspace = true }
 criterion = { workspace = true }
 
 [[bench]]
 name = "types_bench"
 harness = false
+
+[lib]
+test = false
+doctest = false

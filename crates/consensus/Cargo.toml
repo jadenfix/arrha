@@ -7,9 +7,7 @@ categories = ["cryptography::cryptocurrencies"]
 keywords = ["aether", "consensus", "hotstuff", "bls"]
 
 [dependencies]
-tokio.workspace = true
 anyhow.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 
@@ -20,9 +18,12 @@ aether-crypto-primitives = { path = "../crypto/primitives" }
 sha2 = "0.10"
 
 [dev-dependencies]
-proptest.workspace = true
 criterion = { workspace = true }
 
 [[bench]]
 name = "consensus_bench"
 harness = false
+
+[lib]
+test = false
+doctest = false

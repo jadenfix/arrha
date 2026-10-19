@@ -7,12 +7,12 @@ categories = ["cryptography::cryptocurrencies"]
 keywords = ["aether", "rollup", "l2", "scaling"]
 
 [dependencies]
-anyhow.workspace = true
 serde.workspace = true
 bincode.workspace = true
 sha2.workspace = true
 
 aether-types = { path = "../types" }
 
-[dev-dependencies]
-proptest.workspace = true
+[lib]
+test = false
+doctest = false

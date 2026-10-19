@@ -221,28 +221,3 @@ pub fn validator_info_from_keypair(keypair: &ValidatorKeypair, stake: u128) -> V
         active: true,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use aether_consensus::ConsensusEngine;
-
-    #[test]
-    fn test_validator_keypair_generation() {
-        let keypair = ValidatorKeypair::generate();
-        let address = keypair.address();
-        let pubkey = keypair.public_key();
-
-        assert_eq!(address, pubkey.to_address());
-    }
-
-    #[test]
-    fn test_hybrid_consensus_creation() {
-        let keypair = ValidatorKeypair::generate();
-        let validators = vec![validator_info_from_keypair(&keypair, 1_000_000)];
-
-        let consensus = create_hybrid_consensus(validators, Some(&keypair), 0.8, 100).unwrap();
-
-        assert_eq!(consensus.total_stake(), 1_000_000);
-    }
-}

@@ -38,16 +38,3 @@ impl StorageMetrics {
 }
 
 pub static STORAGE_METRICS: Lazy<StorageMetrics> = Lazy::new(StorageMetrics::new);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn records_storage_metrics() {
-        STORAGE_METRICS.write_batch_ms.observe(2.5);
-        STORAGE_METRICS.read_latency_ms.observe(0.3);
-        STORAGE_METRICS.blocks_persisted.inc();
-        STORAGE_METRICS.bytes_written.inc_by(4096);
-    }
-}

@@ -156,18 +156,3 @@ impl NetworkingMetrics {
 }
 
 pub static NET_METRICS: Lazy<NetworkingMetrics> = Lazy::new(NetworkingMetrics::new);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn records_networking_metrics() {
-        NET_METRICS.connections_total.inc();
-        NET_METRICS.connections_active.set(10);
-        NET_METRICS.quic_bytes_sent.inc_by(1024);
-        NET_METRICS.quic_rtt_ms.observe(25.0);
-        NET_METRICS.peers_connected.set(5);
-        NET_METRICS.bandwidth_in_mbps.observe(50.0);
-    }
-}

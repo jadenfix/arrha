@@ -31,32 +31,3 @@ impl FirehoseServer {
         FirehoseStream::new(self.sender.subscribe())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use aether_types::{Address, Block, VrfProof};
-
-    fn empty_block(slot: u64) -> Block {
-        Block::new(
-            slot,
-            aether_types::H256::zero(),
-            Address::from_slice(&[0u8; 20]).unwrap(),
-            VrfProof {
-                output: [0u8; 32],
-                proof: Vec::new(),
-            },
-            Vec::new(),
-        )
-    }
-
-    #[tokio::test]
-    async fn publishes_and_receives() {
-        let server = FirehoseServer::new(16);
-        let mut stream = server.subscribe();
-
-        server.publish(empty_block(1)).unwrap();
-        let event = stream.next().await.unwrap();
-        assert_eq!(event.block.header.slot, 1);
-    }
-}

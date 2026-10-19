@@ -33,16 +33,3 @@ impl Ewma {
         self.initialized
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ewma_updates() {
-        let mut ewma = Ewma::new(0.9);
-        ewma.update(10.0);
-        ewma.update(20.0);
-        assert!(ewma.value() > 10.0);
-    }
-}

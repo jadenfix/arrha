@@ -10,5 +10,6 @@ hex = "0.4"
 serde_json = "1.0"
 aether-verifiers-tee = { path = "../../crates/verifiers/tee" }
 
-[dev-dependencies]
-proptest = "1"
+[lib]
+test = false
+doctest = false

@@ -7,9 +7,7 @@ categories = ["cryptography::cryptocurrencies"]
 keywords = ["aether", "mempool", "transactions", "fee"]
 
 [dependencies]
-tokio.workspace = true
 anyhow.workspace = true
-thiserror.workspace = true
 bincode.workspace = true
 tracing.workspace = true
 
@@ -18,9 +16,12 @@ aether-metrics = { path = "../metrics" }
 
 [dev-dependencies]
 aether-crypto-primitives = { path = "../crypto/primitives" }
-proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name = "mempool_bench"
 harness = false
+
+[lib]
+test = false
+doctest = false

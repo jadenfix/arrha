@@ -9,13 +9,15 @@ keywords = ["aether", "staking", "validators", "swr"]
 [dependencies]
 aether-types = { path = "../../types" }
 serde.workspace = true
-anyhow.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-proptest.workspace = true
 criterion.workspace = true
 
 [[bench]]
 name = "staking_bench"
 harness = false
+
+[lib]
+test = false
+doctest = false

@@ -72,4 +72,3 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \
 USER aether
 
 ENTRYPOINT ["aether-node"]
-CMD ["--config", "/app/config/genesis.toml", "--data-dir", "/app/data"]

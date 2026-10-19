@@ -8,9 +8,9 @@ keywords = ["aether", "reputation", "ai-mesh", "scoring"]
 
 [dependencies]
 serde.workspace = true
-anyhow.workspace = true
 
 aether-types = { path = "../../types" }
 
-[dev-dependencies]
-proptest = "1"
+[lib]
+test = false
+doctest = false

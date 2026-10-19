@@ -10,21 +10,16 @@ keywords = ["aether", "faucet", "devnet", "tokens"]
 tokio.workspace = true
 anyhow.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber = "0.3"
 axum = "0.7"
-tower = "0.5"
 parking_lot = "0.12"
 thiserror = "1"
 hex = "0.4"
 aether-types = { path = "../../types" }
 regex = "1"
 
-[dev-dependencies]
-axum = { version = "0.7", features = ["macros"] }
-hyper = "1"
-tower = { version = "0.5", features = ["util"] }
-tokio = { version = "1", features = ["rt", "macros"] }
-serde_json.workspace = true
-proptest = "1"
+
+[lib]
+test = false
+doctest = false

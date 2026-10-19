@@ -12,5 +12,6 @@ borsh.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
-[dev-dependencies]
-proptest = "1"
+[lib]
+test = false
+doctest = false

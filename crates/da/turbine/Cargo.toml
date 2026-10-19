@@ -7,9 +7,7 @@ categories = ["network-programming", "cryptography::cryptocurrencies"]
 keywords = ["aether", "turbine", "da", "propagation"]
 
 [dependencies]
-tokio.workspace = true
 anyhow.workspace = true
-sha2.workspace = true
 
 aether-da-erasure = { path = "../erasure-coding" }
 aether-da-shreds = { path = "../shreds" }
@@ -17,10 +15,12 @@ aether-types = { path = "../../types" }
 aether-crypto-primitives = { path = "../../crypto/primitives" }
 
 [dev-dependencies]
-rand = "0.8"
-proptest = "1"
 criterion = { workspace = true }
 
 [[bench]]
 name = "turbine"
 harness = false
+
+[lib]
+test = false
+doctest = false

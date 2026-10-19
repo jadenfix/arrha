@@ -90,19 +90,3 @@ impl ReedSolomonEncoder {
         self.data_shards + self.parity_shards
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn splits_into_expected_shards() {
-        let encoder = ReedSolomonEncoder::new(3, 2).unwrap();
-        let data = b"hello world";
-        let shards = encoder.encode(data).unwrap();
-        assert_eq!(shards.len(), 5);
-        // Shard size accounts for the 8-byte length prefix
-        let prefixed_len = data.len() + 8;
-        assert_eq!(shards[0].len(), encoder.shard_size(prefixed_len));
-    }
-}

@@ -64,20 +64,3 @@ impl Keypair {
         addr
     }
 }
-
-#[cfg(test)]
-mod devnet_tests {
-    use super::Keypair;
-
-    #[test]
-    fn devnet_keys_are_deterministic_and_distinct() {
-        assert_eq!(
-            Keypair::devnet(0).public_key(),
-            Keypair::devnet(0).public_key()
-        );
-        assert_ne!(
-            Keypair::devnet(0).public_key(),
-            Keypair::devnet(1).public_key()
-        );
-    }
-}

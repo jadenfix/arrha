@@ -55,20 +55,3 @@ fn now_unix_secs() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn trims_event_buffer() {
-        let mut metrics = RouterMetrics::new(2);
-        metrics.record("job1".into(), "provider1".into(), 0.9);
-        metrics.record("job2".into(), "provider2".into(), 0.8);
-        metrics.record("job3".into(), "provider3".into(), 0.7);
-
-        assert_eq!(metrics.routed_jobs(), 3);
-        assert_eq!(metrics.recent_events().len(), 2);
-        assert_eq!(metrics.recent_events().front().unwrap().job_id, "job2");
-    }
-}

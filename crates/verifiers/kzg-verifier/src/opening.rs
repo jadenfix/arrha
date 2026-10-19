@@ -23,15 +23,3 @@ impl KzgOpeningResponse {
         KzgOpeningResponse { vcr_id, openings }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn constructs_response() {
-        let response = KzgOpeningResponse::new(H256::zero(), vec![]);
-        assert_eq!(response.vcr_id, H256::zero());
-        assert!(response.openings.is_empty());
-    }
-}

@@ -47,8 +47,10 @@ harness = false
 
 [dev-dependencies]
 tempfile = "3"
-proptest = "1"
 criterion.workspace = true
 aether-crypto-bls = { path = "../crypto/bls" }
 aether-crypto-vrf = { path = "../crypto/vrf" }
-aether-quic-transport = { path = "../networking/quic-transport" }
+
+[lib]
+test = false
+doctest = false

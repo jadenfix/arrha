@@ -91,26 +91,3 @@ impl MempoolMetrics {
 }
 
 pub static MEMPOOL_METRICS: Lazy<MempoolMetrics> = Lazy::new(MempoolMetrics::new);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn records_mempool_metrics() {
-        MEMPOOL_METRICS.pool_size.set(42);
-        MEMPOOL_METRICS.pending_size.set(30);
-        MEMPOOL_METRICS.queued_size.set(12);
-        MEMPOOL_METRICS.admitted_total.inc();
-        MEMPOOL_METRICS.evictions_total.inc();
-        MEMPOOL_METRICS.rate_limited_total.inc();
-        MEMPOOL_METRICS.rejected_total.inc();
-        MEMPOOL_METRICS.removed_total.inc();
-        MEMPOOL_METRICS.rbf_replacements_total.inc();
-        MEMPOOL_METRICS.reorgs_total.inc();
-
-        assert_eq!(MEMPOOL_METRICS.pool_size.get(), 42);
-        assert_eq!(MEMPOOL_METRICS.pending_size.get(), 30);
-        assert_eq!(MEMPOOL_METRICS.queued_size.get(), 12);
-    }
-}

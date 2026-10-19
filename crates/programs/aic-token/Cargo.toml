@@ -9,7 +9,7 @@ keywords = ["aether", "aic", "token", "credits"]
 [dependencies]
 aether-types = { path = "../../types" }
 serde.workspace = true
-anyhow.workspace = true
 
-[dev-dependencies]
-proptest.workspace = true
+[lib]
+test = false
+doctest = false

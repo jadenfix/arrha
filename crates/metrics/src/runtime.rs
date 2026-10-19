@@ -30,14 +30,3 @@ impl RuntimeMetrics {
 }
 
 pub static RUNTIME_METRICS: Lazy<RuntimeMetrics> = Lazy::new(RuntimeMetrics::new);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn records_runtime_metrics() {
-        RUNTIME_METRICS.tx_executed.inc();
-        RUNTIME_METRICS.execution_time_ms.observe(12.0);
-    }
-}

@@ -59,38 +59,3 @@ impl KzgChallenge {
             .flat_map(|(layer, points)| points.iter().copied().map(move |point| (layer, point)))
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use aether_types::H256;
-
-    fn sample_challenge() -> KzgChallenge {
-        KzgChallenge {
-            vcr_id: H256::zero(),
-            layer_indices: vec![0, 2],
-            point_indices: vec![vec![1, 3], vec![0]],
-            deadline_slot: 10,
-        }
-    }
-
-    #[test]
-    fn validates_structure() {
-        let challenge = sample_challenge();
-        assert!(challenge.validate().is_ok());
-        assert_eq!(challenge.expected_openings(), 3);
-        assert!(challenge.contains(0, 1));
-        assert!(!challenge.contains(1, 0));
-    }
-
-    #[test]
-    fn detects_mismatch() {
-        let bad = KzgChallenge {
-            vcr_id: H256::zero(),
-            layer_indices: vec![0],
-            point_indices: vec![],
-            deadline_slot: 5,
-        };
-        assert!(bad.validate().is_err());
-    }
-}

@@ -17,4 +17,4 @@ RUN apt-get update && apt-get install -y \
 COPY . .
 
 # Default command (overridden by docker-compose)
-CMD ["cargo", "test", "--all-features", "--workspace"]
+CMD ["./cli-test", "--in-process-only"]

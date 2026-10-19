@@ -25,7 +25,8 @@ export class SolanaSettlement {
    const info=await this.connection.getAccountInfo(this.program,'finalized');if(!info?.executable||!info.owner.equals(LOADER))throw Error('Wrong Solana deployment');
    const dataAddress=(await PublicKey.findProgramAddress([this.program.toBytes()],LOADER))[0];const data=await this.connection.getAccountInfo(dataAddress,'finalized');
    if(!data||hash(data.data.subarray(45)).toString('hex')!==this.manifest.programDataHash)throw Error('Solana program bytecode changed');
-   const config=await this.connection.getAccountInfo(this.config,'finalized');if(config&&(!config.owner.equals(this.program)||!new PublicKey(config.data.subarray(8,40)).equals(this.mint)||config.data[40]!==this.manifest.decimals))throw Error('Wrong Solana asset profile');
+   const config=await this.connection.getAccountInfo(this.config,'finalized');if(config&&(!config.owner.equals(this.program)||config.data.length!==65||!new PublicKey(config.data.subarray(8,40)).equals(this.mint)||config.data[40]!==this.manifest.decimals))throw Error('Wrong Solana asset profile');
+   if(config){const data=Buffer.from(config.data);if((this.manifest.maxPerRun!==undefined&&data.readBigUInt64LE(41)!==BigInt(this.manifest.maxPerRun))||(this.manifest.maxOutstanding!==undefined&&data.readBigUInt64LE(49)!==BigInt(this.manifest.maxOutstanding)))throw Error('Wrong Solana caps');}
  }
  instruction(name,keys,data=Buffer.alloc(0)){return new TransactionInstruction({programId:this.program,keys,data:Buffer.concat([discriminator(name),data])});}
  async initialize(authority,maxPerRun,maxOutstanding){await this.verify();return this.instruction('initialize',[meta(authority,true,true),meta(this.config,false,true),meta(this.mint),meta(this.program),meta((await PublicKey.findProgramAddress([this.program.toBytes()],LOADER))[0]),meta(SystemProgram.programId)],Buffer.concat([u64(maxPerRun),u64(maxOutstanding)]));}

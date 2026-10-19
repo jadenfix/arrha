@@ -16,7 +16,7 @@ execution, relayer custody or gas sponsorship. Local fixture caps are 10
 whole fixture units/run and 100 outstanding; the public test-USDC deployment is
 capped at 1/run and 10 outstanding. Real-funds limits and gas budget
 must be explicitly recorded before that gate. The constructor validates the
-asset's code/decimals. Exact incoming balance change rejects transfer-fee tokens.
+asset's code/decimals. Exact incoming credit and payer debit reject both deducted and additional transfer fees.
 Rebasing, malicious, fee-on-transfer, transfer-hook and variable-balance tokens
 are unsupported; an allowlisted address must first be independently reviewed.
 USDC's issuer can pause/blacklist/upgrade its token; Arrha cannot bypass that.

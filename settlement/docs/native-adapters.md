@@ -51,8 +51,16 @@ It requires `ARRHA_PUBLIC_SOLANA=devnet`, `ARRHA_SOLANA_MANIFEST`,
 program, payer or a wallet exceeding its 5 test-SOL budget. The payer covers test
 transaction fees; provider/arbitrator still provide separate native signatures.
 It journals mint/ATA/config setup and each payment before broadcasting and checks
-finalized payout, refund, split balances and zero vault liabilities. This public
-runner is unqualified until executed against the actual devnet deployment.
+finalized payout, refund, split balances and zero vault liabilities. The public
+runner executed successfully on 2026-10-19: payout, refund and a 0.4/0.6 split
+finalized with 98.6 payer / 1.4 provider fixture units and zero vault liabilities.
+`solana-devnet.json` and `solana-devnet.journeys.json` record the deployed profile
+and actual signatures. One delivery was dropped and expired; a retained operator
+review proved absent history, finalized expiry and an Accepted canonical run.
+`ARRHA_SOLANA_RECOVERY_FILE` explicitly selects a new operation ID for that exact
+instruction/fee-payer intent, preserving the old signed bytes. No automatic
+blockhash refresh occurs. Valid signed bytes may be rebroadcast unchanged.
+Restart preserved all 18 records: 17 finalized actions and one expired intent.
 
 Terms use 32-byte run/work/evidence commitments, provider/arbitrator/receipt-signer
 Pubkeys, u64 amount/nonce, i64 Unix deadlines. Native payer transaction signatures
@@ -67,7 +75,7 @@ checked transfers, deadlines and terminal states are enforced on chain.
 
 Initialization requires the actual program upgrade authority from ProgramData.
 Only that signer may set the immutable asset/caps once. The SDK pins genesis,
-program-data bytecode hash and initialized mint/decimals. The upgrade authority
+program-data bytecode hash, initialized mint/decimals and manifest caps. The upgrade authority
 can still change program code until explicitly removed. A public profile must
 publish that authority and its custody, then independently review and finalize
 (or explicitly govern) upgrades before real funds. EVM's no-upgrade promise must

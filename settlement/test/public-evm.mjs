@@ -42,17 +42,19 @@ try {
     }
     db.db.prepare('INSERT INTO snapshots VALUES(?,?)').run(snapshotKey,json(plan));
   }
+  const opKey=name=>`${m.escrow.toLowerCase()}:${name}`;
   async function send(name,wallet,request) {
+    name=opKey(name);
     const op=await db.prepare(name,wallet,request);await db.broadcast(name,p);
     const receipt=await p.waitForTransaction(op.hash,1,60000);assert.equal(receipt.status,1,`${name} reverted`);
     const status=await db.reconcile(name,p,m.finality);console.log(json({operation:name,hash:op.hash,block:receipt.blockNumber,status:status.status}));
   }
   // Fixed, once-only top-ups leave ample headroom within the original 0.001 test ETH.
   for(const [name,w,value] of [['provider-gas',provider,50000000000000n],['arbitrator-gas',arbitrator,25000000000000n]]) {
-    if(db.operation(name)||await p.getBalance(w.address)<value/2n)await send(name,payer,{to:w.address,value});
+    if(db.operation(opKey(name))||await p.getBalance(w.address)<value/2n)await send(name,payer,{to:w.address,value});
   }
   const approval='approve-three-test-usdc';
-  if(db.operation(approval)||await t.allowance(payer.address,m.escrow)<3000000n)await send(approval,payer,await sdk.approveRequest(3000000n));
+  if(db.operation(opKey(approval))||await t.allowance(payer.address,m.escrow)<3000000n)await send(approval,payer,await sdk.approveRequest(3000000n));
   for(const [name,r] of Object.entries(plan.runs)) {
     const run=r.terms.runId;
     const state=async()=>Number((await sdk.inspect(run)).state);
@@ -79,7 +81,7 @@ try {
   assert.equal(BigInt(after[provider.address]),BigInt(plan.baseline[provider.address])+1400000n);
   assert.equal(after[m.escrow],plan.baseline[m.escrow]);assert.equal(await c.outstanding(),0n);
   const operations=[];
-  for(const row of db.db.prepare('SELECT id FROM operations ORDER BY nonce').all()) {
+  for(const row of db.db.prepare('SELECT id FROM operations WHERE id LIKE ? ORDER BY nonce').all(`${m.escrow.toLowerCase()}:%`)) {
     const op=await db.reconcile(row.id,p,m.finality);operations.push({id:op.id,hash:op.hash,status:op.status});
   }
   const projection=await sync(db,p,m,abi);

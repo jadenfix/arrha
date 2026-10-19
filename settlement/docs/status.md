@@ -15,7 +15,7 @@ Executed receipts and exact source revisions accompany release evidence separate
 | Adversarial token/security | Local fee-token rejection, failed-transfer rollback, reentrancy rejection, donation accounting and caps exercised; Slither 0.11.6 executed (87 reports including dependencies; triage recorded); independent security review pending |
 | Public testnet | Arbitrum Sepolia funded through free faucets; capped test-USDC escrow deployed; Sourcify exact source/creation/runtime match; all 14 public transactions finalized; canonical index reconstructs Settled/Refunded/Resolved with exact balances and zero liabilities; restart recovered the same hashes with no extra signer nonces |
 | Capped mainnet pilot | Funding approval, reviewed asset, independent review, verified public deployment, operating/custody controls and reconciled pilot pending |
-| Solana | Native SPL-token escrow + SDK/journal local-validator E2E passed: payout, refund, dispute, bad signer/destination/program, revocation, recovery and deadlines; browser, devnet, review and mainnet pending |
+| Solana | Native SPL-token escrow + SDK/journal local-validator E2E passed: payout, refund, dispute, bad signer/destination/program, revocation, recovery and deadlines; public devnet SDK payout/refund/dispute and reviewed expired-delivery recovery finalized, restart preserved 18 signed records (17 applied, one expired); browser, independent review and mainnet pending |
 | Bitcoin on-chain and Lightning | Bitcoin Core regtest payment/reorg/recovery E2E and two-node LND payment/expiry/recovery E2E passed; public test-network qualification pending; no escrow parity advertised |
 
 The long-running goal must remain active/incomplete until the requested

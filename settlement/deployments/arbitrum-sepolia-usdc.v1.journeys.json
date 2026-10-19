@@ -1,0 +1,151 @@
+{
+  "network": "Arbitrum Sepolia",
+  "chainId": 421614,
+  "escrow": "0xc4a9e0594FaAbE346BcfB963B551a7aE5c38d0cf",
+  "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+  "observedAt": "2026-10-19T07:42:35.977Z",
+  "baseline": {
+    "0x551fB2a948b56Ab1Da7ca76e829a2bf3b267648D": "20000000",
+    "0x5bbe43e2c14334928f10448C2aBaE0e7Ec2E4861": "0",
+    "0xc4a9e0594FaAbE346BcfB963B551a7aE5c38d0cf": "0"
+  },
+  "balances": {
+    "0x551fB2a948b56Ab1Da7ca76e829a2bf3b267648D": "18600000",
+    "0x5bbe43e2c14334928f10448C2aBaE0e7Ec2E4861": "1400000",
+    "0xc4a9e0594FaAbE346BcfB963B551a7aE5c38d0cf": "0"
+  },
+  "outstanding": "0",
+  "runs": {
+    "payout": {
+      "runId": "0x5161e04ff5eb0fb4a981eae653809dc89ffad0a472aa0aed0405a4c0e4abc6d1",
+      "evidenceHash": "0x758c1542a9fb0aad663a0044e0ed5adc86c06d6219b5c4a9dec16aa2caceaa0d"
+    },
+    "refund": {
+      "runId": "0x06b46c3db0659f4619700709882f2de1dce9ad45e4c723ec06b05f7f099060db",
+      "evidenceHash": "0x758c1542a9fb0aad663a0044e0ed5adc86c06d6219b5c4a9dec16aa2caceaa0d"
+    },
+    "dispute": {
+      "runId": "0xa4fe4771fb1b669a45655f554f742741e0ec3e16925f474fcd1c66b2fde0573f",
+      "evidenceHash": "0x758c1542a9fb0aad663a0044e0ed5adc86c06d6219b5c4a9dec16aa2caceaa0d"
+    }
+  },
+  "operations": [
+    {
+      "id": "payout:accept",
+      "hash": "0x6458455c2cf8f300a90c3420bffbd6f864a7bf29d27a484886bbbc96443e82dc",
+      "status": "Finalized"
+    },
+    {
+      "id": "dispute:resolve",
+      "hash": "0x1905389d7478dcf90bd581fdb98300218a65715d148ee5ec33932921d2f13fe4",
+      "status": "Finalized"
+    },
+    {
+      "id": "provider-gas",
+      "hash": "0x7a6ee6f21972f7b8ad0ec830338a35c1fccd11b15faf148d75ea442881cb4752",
+      "status": "Finalized"
+    },
+    {
+      "id": "payout:deliver",
+      "hash": "0x34f33defe8b13233ea6f91770f2046d42e4bebad862bded6a2795f401dae922a",
+      "status": "Finalized"
+    },
+    {
+      "id": "arbitrator-gas",
+      "hash": "0x2db32dab35b87d6a7bc776d713564852c344b3108c19b928f33a1ca31dc4f6e4",
+      "status": "Finalized"
+    },
+    {
+      "id": "dispute:accept",
+      "hash": "0xdd8156d217e3b555ae34ac94a97012d6b6119eea3896ec61b5c55759d655a526",
+      "status": "Finalized"
+    },
+    {
+      "id": "approve-three-test-usdc",
+      "hash": "0xffe23b99e354bd3446308bde003f178db8ff219ac39251cbd1642e059e5c8c40",
+      "status": "Finalized"
+    },
+    {
+      "id": "dispute:deliver",
+      "hash": "0x6300dd010af238ec4616fcbdb40b33cf3b6871d8e420a25d9d10db1b0acf505b",
+      "status": "Finalized"
+    },
+    {
+      "id": "payout:fund",
+      "hash": "0x917af9438cdd146a0993e5f02e256a34cb2a5392af6eb173c4937ab88fa4e7b4",
+      "status": "Finalized"
+    },
+    {
+      "id": "payout:settle",
+      "hash": "0xd5d6349070219c6d64b157ec922d60e4cfb91c9fdb256d1166de4d9b9021a14b",
+      "status": "Finalized"
+    },
+    {
+      "id": "refund:fund",
+      "hash": "0x79ca70f0ae9aa60c98f4257ffefb9b1b5cb341426599a4f2946ccc76a80b60ca",
+      "status": "Finalized"
+    },
+    {
+      "id": "refund:refund",
+      "hash": "0x5439f4cfe7067a73e5a504d6e702768c4abff49f0891b628a8104f82594e4759",
+      "status": "Finalized"
+    },
+    {
+      "id": "dispute:fund",
+      "hash": "0x41bb6eb1ad797e9ecb25239f0892c1b9246d1f204363c9d19018f877c172644d",
+      "status": "Finalized"
+    },
+    {
+      "id": "dispute:dispute",
+      "hash": "0xf17c89ce6404a90e852408ce446d27a056672047e1360a12aa312270bd34ddab",
+      "status": "Finalized"
+    }
+  ],
+  "projection": {
+    "availability": "available",
+    "chainId": 421614,
+    "escrow": "0xc4a9e0594FaAbE346BcfB963B551a7aE5c38d0cf",
+    "finalityPolicy": "finalized",
+    "block": 320659452,
+    "blockHash": "0x5ab5382d5dad5c37752771fd2f272c02d6dd84b9ae73c5e7de040e9f8e034518",
+    "eventCount": 11,
+    "outstanding": "0",
+    "runs": [
+      {
+        "runId": "0x5161e04ff5eb0fb4a981eae653809dc89ffad0a472aa0aed0405a4c0e4abc6d1",
+        "payer": "0x551fB2a948b56Ab1Da7ca76e829a2bf3b267648D",
+        "provider": "0x5bbe43e2c14334928f10448C2aBaE0e7Ec2E4861",
+        "amount": "1000000",
+        "state": "Settled",
+        "evidence": "0x758c1542a9fb0aad663a0044e0ed5adc86c06d6219b5c4a9dec16aa2caceaa0d",
+        "providerAmount": "1000000",
+        "payerAmount": "0",
+        "transaction": "0xd5d6349070219c6d64b157ec922d60e4cfb91c9fdb256d1166de4d9b9021a14b"
+      },
+      {
+        "runId": "0x06b46c3db0659f4619700709882f2de1dce9ad45e4c723ec06b05f7f099060db",
+        "payer": "0x551fB2a948b56Ab1Da7ca76e829a2bf3b267648D",
+        "provider": "0x5bbe43e2c14334928f10448C2aBaE0e7Ec2E4861",
+        "amount": "1000000",
+        "state": "Refunded",
+        "evidence": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "providerAmount": "0",
+        "payerAmount": "1000000",
+        "transaction": "0x5439f4cfe7067a73e5a504d6e702768c4abff49f0891b628a8104f82594e4759"
+      },
+      {
+        "runId": "0xa4fe4771fb1b669a45655f554f742741e0ec3e16925f474fcd1c66b2fde0573f",
+        "payer": "0x551fB2a948b56Ab1Da7ca76e829a2bf3b267648D",
+        "provider": "0x5bbe43e2c14334928f10448C2aBaE0e7Ec2E4861",
+        "amount": "1000000",
+        "state": "Resolved",
+        "evidence": "0x758c1542a9fb0aad663a0044e0ed5adc86c06d6219b5c4a9dec16aa2caceaa0d",
+        "providerAmount": "400000",
+        "payerAmount": "600000",
+        "transaction": "0x1905389d7478dcf90bd581fdb98300218a65715d148ee5ec33932921d2f13fe4"
+      }
+    ],
+    "observedAt": "2026-10-19T07:42:35.976Z"
+  },
+  "allFinalized": true
+}

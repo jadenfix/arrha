@@ -1,0 +1,165 @@
+{
+  "network": "Solana devnet",
+  "manifest": {
+    "schemaVersion": 1,
+    "network": "Solana devnet",
+    "genesis": "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+    "program": "3nf8gyJnj2aSLyeERjAysJTHCSjuBcxUA2giH8ZXS4hu",
+    "mint": "D8Q4NwWQTBdDe3cTdyFtkCh3EZpiuEvP9fN3KiSVb8ZU",
+    "assetName": "aTEST fixture, not USDC; no monetary value",
+    "decimals": 6,
+    "maxPerRun": "1000000",
+    "maxOutstanding": "10000000",
+    "upgradeAuthority": "6oRGKsgso5kyNeP4apXWrt8yYSQDFCZ87bGBV1jj3aMX",
+    "expectedBinarySha256": "50f69e24809172007a32153ab2494084fecc549efddd2099f7981ef98414680a",
+    "binaryBytes": 370984,
+    "minimumProgramDataRentLamports": "1885477560",
+    "minimumBufferRentLamports": "1885436920",
+    "feature": "devnet",
+    "qualification": "Finalized devnet deployment and SDK payout/refund/dispute, expiry recovery and restart journeys; local image and authority verified; independent review and mainnet pending",
+    "programDataHash": "50f69e24809172007a32153ab2494084fecc549efddd2099f7981ef98414680a",
+    "programDataAccount": "BwttgH1urp5t8HsfPYouNpdK4RU3C9CEwjBZZbS4vTD9",
+    "deploymentSignature": "5HiLJueXokGKN5Ls7ghbZfSinbnZ7F5ewpCyeEsFTE91yPycjxD7ZDKzAiuuoZFh1QnaUBaeL8un6vCtGBuhMKBZ",
+    "deploymentSlot": "512727686",
+    "finality": "finalized",
+    "compiler": {
+      "cargoBuildSbf": "4.4.0",
+      "platformTools": "1.57",
+      "anchor": "0.32.1",
+      "feature": "devnet"
+    }
+  },
+  "assetName": "aTEST fixture, not USDC; no monetary value",
+  "runs": {
+    "payout": {
+      "runId": "ee62cb489ef5a7a20ac821b754d3094e960fdc0db0a011c41c2f773e21320a5c",
+      "state": 5
+    },
+    "refund": {
+      "runId": "18c825a632d6b3e324b895f8e03e6169e38d9e41f70f789276a5566d25406cdc",
+      "state": 6
+    },
+    "dispute": {
+      "runId": "2455df07a9d4551799b900fcd7a844be2d19afe87384866baf0ac20ed7c175ba",
+      "state": 7
+    }
+  },
+  "baseline": {
+    "payer": "100000000",
+    "provider": "0"
+  },
+  "balances": {
+    "payer": "98600000",
+    "provider": "1400000"
+  },
+  "outstanding": "0",
+  "allFinalized": true,
+  "finalityScope": "All applied journey actions; explicitly expired authorizations retained separately",
+  "recoveries": {
+    "dispute:deliver": {
+      "replacementId": "dispute:deliver:after-expiry-v1",
+      "originalSignature": "2PiaomJmMGy89RTjZEbtaGDScHZxHYfmT5Ge5AFt4GZ7ohPKhDCcat1Y6oJWkCwhcUcH8N4BGD3bdgw4xLLRSES8",
+      "reason": "Operator reviewed finalized expiry and absent original history; canonical run remains Accepted; exact delivery intent may be reauthorized once",
+      "reviewedAt": "2026-10-19T07:56:26.237Z",
+      "finalizedBlockHeight": 499941903,
+      "lastValidBlockHeight": 499940862,
+      "canonicalRun": "DxxYADHoe9qhXtqmSaxbYej2dD84tVfWAgyYvPNyK3Bd",
+      "canonicalRunState": 2,
+      "originalIntentHash": "6442a3baaa39f11dea1015e20273d6a3eac0311d5d79fc2c1ae6f67d84fe968a"
+    }
+  },
+  "operations": [
+    {
+      "id": "mint:create",
+      "signature": "5G1W4KmV3xR2BcPGWg79np5hLPZGuAgPaeLyKeKCfT4bgcjSnxYcJDZXvX62GTSZQK7DsteFyvyGEZYnjMNhTXEh",
+      "state": "finalized"
+    },
+    {
+      "id": "mint:initialize",
+      "signature": "3NDJVmEH4yQgx2HoREYWcBEHKuQPqJ2rt16SBa5h5nm4E59xN3bTzZ4HbW7vJwrxZ4agUf2r3QPrjGq67oJSx3sf",
+      "state": "finalized"
+    },
+    {
+      "id": "ata:payer",
+      "signature": "NbN8qXZ1Fz1JxEbcpzTWyshA9LeFb6T9WqHYhL6ZqaJizEc2xZfw5e7h8azHyK7ir7hXVpvJu11KnMTfJvzZeq6",
+      "state": "finalized"
+    },
+    {
+      "id": "ata:provider",
+      "signature": "3pAmkEkM1Qpb2v6MCmeepJ8QdN4q7BLCQnLH2o3Ge4uk1rbS3yR82EuTbRDecADuFX1K5fZLMyuAjLK13BeTijx1",
+      "state": "finalized"
+    },
+    {
+      "id": "mint:fixtures",
+      "signature": "439jg41iLBJtJjuvPuGsa3xStPq6uYdEyKWY485aLousuKjGseifQdaY5hMkwHhvZqRHkuCxikbYGK9jJ7E32MDL",
+      "state": "finalized"
+    },
+    {
+      "id": "config:initialize",
+      "signature": "5rw2KxWHPW2f96TWrnyn9u8qx8uyXovYqx2AqjkiTJwi6txFdqvVah1xqvZ1Pu9PH5MaiwvX15281udee9jLXg5B",
+      "state": "finalized"
+    },
+    {
+      "id": "payout:fund",
+      "signature": "5ibhWLBj47qq6B6189fpugG2a26Fchiyuj1Zjp5U5ZQms3aycA5K4Lzrwq51FcF33wES3DrNu7Lk5Cnqnp8YjE5e",
+      "state": "finalized"
+    },
+    {
+      "id": "payout:accept",
+      "signature": "4g4KyCN8KefGxRtc4NaqZy7h51x2fmbHrEB2cwNHsxLomjR4Km2mu9Hzm4jwCcV5Uqzp9hwoFYEQUW99aqhocEZV",
+      "state": "finalized"
+    },
+    {
+      "id": "payout:deliver",
+      "signature": "2SpVnUFGCRhhfRxirTqo3HAZsC9U32Uiu1TWrZ8iXH5cp1VKWcFVBUdbHkL88SkTZr8HKjrqs4v2NRcfCM58S13y",
+      "state": "finalized"
+    },
+    {
+      "id": "payout:settle",
+      "signature": "3pFhxopssYvaB2Qb9rM3V8BHLsAaQWpLEpP4Ap6bGKXHYvdLemYHFoHDVzE3iCnvJM11V6AE6GRfJ6R2FZVeXy8J",
+      "state": "finalized"
+    },
+    {
+      "id": "refund:fund",
+      "signature": "5fyNyrwenRoHtqopptm4n9moPzzhYDd83Kupwqb4thzmZn6BDUHTmuGHtu9gsYBwqZ1aKUXwMSALjxbd4HH5QAeD",
+      "state": "finalized"
+    },
+    {
+      "id": "refund:refund",
+      "signature": "wXemLysoXQBLV8b8EGiCTe6mnFiiHx7qRHbwctRTm4i2KL94sY8ftPUwVhQt9XANLvc1g8yRVj2EubKxycwy6kQ",
+      "state": "finalized"
+    },
+    {
+      "id": "dispute:fund",
+      "signature": "5DDKexWGLM7vnANiX3iGHnaiRfgu6uzhmTxEbcbD43tD3GBoosdfw4b4VDHevGCrRNT4zE7vN7kEj8joWbVLvoos",
+      "state": "finalized"
+    },
+    {
+      "id": "dispute:accept",
+      "signature": "CdHBeGYr8CNgqbXjkee2P6QdE1BVL1qdbfui8JCxYRH9dJXNRTRGV1SdBCTqZFe2kVGqqGrdBQUjytmBqGe7YY5",
+      "state": "finalized"
+    },
+    {
+      "id": "dispute:deliver",
+      "signature": "2PiaomJmMGy89RTjZEbtaGDScHZxHYfmT5Ge5AFt4GZ7ohPKhDCcat1Y6oJWkCwhcUcH8N4BGD3bdgw4xLLRSES8",
+      "state": "Expired",
+      "replacementId": "dispute:deliver:after-expiry-v1"
+    },
+    {
+      "id": "dispute:deliver:after-expiry-v1",
+      "signature": "CopoVFGMDzVeLhjKCGhdZMzhr7gcBjnUujo5qcxHeuuNK1NSFCiX8Xo5GH64sa4jQx1oinBmi9Y3aWBzSRp5iE9",
+      "state": "finalized"
+    },
+    {
+      "id": "dispute:dispute",
+      "signature": "5bBQ5t93jHgGdnX7XwQNQJ5cMUXKsqDtkDtMU6sMZcWmheroguxrEjoHkd7bjnmFyeuf4yVgcgiDHHHHsjBm33c6",
+      "state": "finalized"
+    },
+    {
+      "id": "dispute:resolve",
+      "signature": "4rSkdyKxSrMaFVc6nLiAhsz9oG69BZuogzFBtYrY4BzSbLgNiMny11LvGDTjxpVhWsu1XjpaKB8fP133LEuvU7Qz",
+      "state": "finalized"
+    }
+  ],
+  "observedAt": "2026-10-19T08:01:35.350Z"
+}

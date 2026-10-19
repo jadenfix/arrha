@@ -42,13 +42,15 @@ test('Solana local validator: actual SPL-token escrow with native signatures and
  const payerTokens=await ata(mint.publicKey,payer.publicKey),providerTokens=await ata(mint.publicKey,provider.publicKey);
  await send(new TransactionInstruction({programId:TOKEN_PROGRAM,keys:[pk(mint.publicKey,false,true),pk(payerTokens,false,true),pk(payer.publicKey,true)],data:Buffer.concat([Buffer.from([7]),u64(100000000n)])}));
  const dataKey=(await PublicKey.findProgramAddress([PROGRAM_ID.toBytes()],LOADER))[0],data=await connection.getAccountInfo(dataKey,'finalized');
- const manifest={program:PROGRAM_ID.toBase58(),mint:mint.publicKey.toBase58(),genesis:await connection.getGenesisHash(),decimals:6,programDataHash:sha(data.data.subarray(45)).toString('hex')};
+ const manifest={program:PROGRAM_ID.toBase58(),mint:mint.publicKey.toBase58(),genesis:await connection.getGenesisHash(),decimals:6,maxPerRun:'10000000',maxOutstanding:'100000000',programDataHash:sha(data.data.subarray(45)).toString('hex')};
  const sdk=new SolanaSettlement(connection,manifest);await assert.rejects(send(await sdk.initialize(stranger.publicKey,10000000n,100000000n),[stranger]));await send(await sdk.initialize(payer.publicKey,10000000n,100000000n));
  store=new Store(`${dir}/journal.sqlite`);let journal=new SolanaJournal(store,sdk),counter=0;
  const amount=async address=>BigInt((await connection.getTokenAccountBalance(address,'finalized')).value.amount);
  async function terms(overrides={}){counter++;const slot=await connection.getSlot('finalized'),now=Number(await connection.getBlockTime(slot));return {runId:sha(`solana-run-${counter}`),provider:provider.publicKey,arbitrator:arbitrator.publicKey,receiptSigner:provider.publicKey,amount:1000000n,workHash:sha('work'),evidencePolicy:sha('policy'),fundBy:now+60,acceptBy:now+120,deliverBy:now+180,reviewUntil:now+240,resolveBy:now+300,nonce:counter,...overrides};}
  async function durable(ix,signers=[payer]){const id=`op-${++counter}`;const op=await journal.prepare(id,ix,signers[0],signers);await journal.broadcast(id);await confirm(op.signature);return op;}
  await t.test('wrong initializer, actual funding/delivery/settlement and fixed recipient balances',async()=>{
+   await assert.rejects(new SolanaSettlement(connection,{...manifest,maxPerRun:'100000000'}).verify(),/Wrong Solana caps/);
+   await assert.rejects(new SolanaSettlement(connection,{...manifest,maxOutstanding:'1000000000'}).verify(),/Wrong Solana caps/);
    const a=await terms(),before=await amount(providerTokens);
    await durable(await sdk.fund(payer.publicKey,a));assert.equal((await sdk.inspect(payer.publicKey,a)).state,1);
    await assert.rejects(durable(await sdk.act('accept',stranger.publicKey,payer.publicKey,a),[stranger]));

@@ -108,6 +108,9 @@ test('real EVM contract, public SDK, persistent journal and canonical HTTP servi
    const a=await f.terms({asset:m.asset}),sig=await sdk.signAgreement(a);
    await(await attack.configure(false,1n,'0x0000000000000000000000000000000000000000','0x')).wait();
    await assert.rejects(f.send(sdk,'fund',a,sig));assert.equal(await escrow.outstanding(),0n);assert.equal(await escrow.usedNonces(a.payer,a.nonce),false);
+   const payerBefore=await attack.balanceOf(a.payer);await(await attack.setFeeOnTop(true)).wait();
+   await assert.rejects(f.send(sdk,'fund',a,sig));assert.equal(await attack.balanceOf(a.payer),payerBefore);assert.equal(await attack.balanceOf(m.escrow),0n);assert.equal(await escrow.outstanding(),0n);assert.equal(await escrow.usedNonces(a.payer,a.nonce),false);
+   await(await attack.setFeeOnTop(false)).wait();
    await(await attack.configure(false,0n,'0x0000000000000000000000000000000000000000','0x')).wait();
    await f.send(sdk,'fund',a,sig);
    const tooBig=await f.terms({asset:m.asset,amount:1000001n});await assert.rejects(f.send(sdk,'fund',tooBig,await sdk.signAgreement(tooBig)));

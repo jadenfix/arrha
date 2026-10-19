@@ -1,10 +1,12 @@
 # Arrha settlement v1
 
 Independent EVM payment/escrow package. No Arrha validator, token, bridge,
-consensus or agent execution dependency. **Local E2E and capped Arbitrum Sepolia SDK journeys qualified.**
-Published source matches exactly; payout/refund/dispute transactions finalized.
-Independent security review and real-funds pilot remain release gates. Solana escrow and Bitcoin/Lightning payment adapters have separate local
-E2E journeys; their browser/public integrations remain unqualified.
+consensus or agent execution dependency. **Local E2E passed; public evidence is version-specific.**
+Arbitrum Sepolia v1 completed finalized payout/refund/dispute journeys. The current
+strict incoming-debit revision requires a newly qualified test deployment.
+Independent security review and real-funds pilot remain release gates. Solana escrow has separate local-validator and finalized public-devnet SDK
+journeys. Bitcoin/Lightning adapters have local native payment E2E. Native browser,
+public Bitcoin/Lightning and mainnet integrations remain unqualified.
 
 ## Run
 

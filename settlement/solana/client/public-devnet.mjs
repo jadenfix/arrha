@@ -18,15 +18,29 @@ const [payer,provider,arbitrator,mint]=await Promise.all(['deployer','provider',
 assert.equal(payer.publicKey.toBase58(),'6oRGKsgso5kyNeP4apXWrt8yYSQDFCZ87bGBV1jj3aMX');assert.equal(mint.publicKey.toBase58(),m.mint);
 const connection=new Connection(process.env.ARRHA_SOLANA_RPC ?? 'https://api.devnet.solana.com','finalized');
 const sdk=new SolanaSettlement(connection,m),store=new Store(`${dir}/journal.sqlite`),journal=new SolanaJournal(store,sdk);
+// Optional operator-reviewed expiry recovery; never refresh an uncertain blockhash automatically.
+const recoveries=process.env.ARRHA_SOLANA_RECOVERY_FILE?read(process.env.ARRHA_SOLANA_RECOVERY_FILE):{};
 const pk=(pubkey,isSigner=false,isWritable=false)=>({pubkey,isSigner,isWritable});
 try {
  await sdk.verify();assert.ok(await connection.getBalance(payer.publicKey,'finalized')<=5000000000n,'Dedicated test SOL budget exceeded');
- async function send(id,ix,signers=[]) {
-  const op=await journal.prepare(id,ix,payer,signers);await journal.broadcast(id);
+ async function send(logicalId,ix,signers=[]) {
+  const recovery=recoveries[logicalId],id=recovery?.replacementId ?? logicalId;
+  let original;
+  if(recovery) {
+   original=store.db.prepare('SELECT * FROM solana_operations WHERE id=?').get(logicalId);
+   assert.ok(recovery.reason&&id!==logicalId);assert.equal(original?.signature,recovery.originalSignature);
+   assert.equal((await connection.getSignatureStatuses([original.signature],{searchTransactionHistory:true})).value[0],null);
+   assert.ok(await connection.getBlockHeight('finalized')>original.last_valid,'Original signature may still land');
+  }
+  const op=await journal.prepare(id,ix,payer,signers);
+  if(original)assert.equal(store.db.prepare('SELECT intent_hash FROM solana_operations WHERE id=?').get(id).intent_hash,original.intent_hash,'Recovery must preserve the exact instruction and fee payer');
+  await journal.broadcast(id);
   for(let i=0;i<90;i++) {
    const status=(await connection.getSignatureStatuses([op.signature],{searchTransactionHistory:true})).value[0];
    if(status?.err)throw Error(`${id}: ${JSON.stringify(status.err)}`);
    if(status?.confirmationStatus==='finalized'){console.log(json({operation:id,signature:op.signature,state:'finalized'}));return;}
+   // Retry only the same persisted bytes while the original blockhash remains valid.
+   if(i>0&&i%10===0)await journal.broadcast(id);
    await new Promise(r=>setTimeout(r,2000));
   }
   throw Error(`Finality unavailable: ${id}; retain journal and reconcile existing signature`);
@@ -73,6 +87,13 @@ try {
  const balances={payer:String(await balance(payerTokens)),provider:String(await balance(providerTokens))};
  assert.equal(BigInt(balances.payer),BigInt(plan.baseline.payer)-1400000n);assert.equal(BigInt(balances.provider),BigInt(plan.baseline.provider)+1400000n);
  const config=await connection.getAccountInfo(sdk.config,'finalized');assert.equal(Buffer.from(config.data).readBigUInt64LE(57),0n);
- const report={network:'Solana devnet',manifest:m,assetName:'aTEST fixture, not USDC; no monetary value',runs,baseline:plan.baseline,balances,outstanding:'0',allFinalized:true,operations:store.db.prepare('SELECT id,signature FROM solana_operations').all(),observedAt:new Date().toISOString()};
+ const rows=store.db.prepare('SELECT id,signature,last_valid FROM solana_operations').all(),statuses=(await connection.getSignatureStatuses(rows.map(o=>o.signature),{searchTransactionHistory:true})).value;
+ const height=await connection.getBlockHeight('finalized');
+ const operations=rows.map((o,i)=>{
+  const recovery=recoveries[o.id];
+  if(recovery){assert.equal(statuses[i],null);assert.ok(height>o.last_valid);return {id:o.id,signature:o.signature,state:'Expired',replacementId:recovery.replacementId};}
+  assert.equal(statuses[i]?.err,null);assert.equal(statuses[i]?.confirmationStatus,'finalized');return {id:o.id,signature:o.signature,state:'finalized'};
+ });
+ const report={network:'Solana devnet',manifest:m,assetName:'aTEST fixture, not USDC; no monetary value',runs,baseline:plan.baseline,balances,outstanding:'0',allFinalized:true,finalityScope:'All applied journey actions; explicitly expired authorizations retained separately',recoveries,operations,observedAt:new Date().toISOString()};
  writeFileSync(`${dir}/report.json`,json(report));console.log(json(report));
 }finally{store.close();}

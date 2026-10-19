@@ -77,8 +77,10 @@ contract ArrhaEscrow is EIP712, ReentrancyGuard {
         escrows[a.runId] = Escrow(a, State.Funded, bytes32(0));
         outstanding += a.amount;
         uint256 beforeBalance = token.balanceOf(address(this));
+        uint256 payerBefore = token.balanceOf(a.payer);
         token.safeTransferFrom(a.payer, address(this), a.amount);
-        if (token.balanceOf(address(this)) - beforeBalance != a.amount) revert UnsupportedToken();
+        if (token.balanceOf(address(this)) != beforeBalance + a.amount ||
+            token.balanceOf(a.payer) != payerBefore - a.amount) revert UnsupportedToken();
         emit Funded(a.runId, a.payer, a.provider, a.amount);
     }
     function accept(bytes32 id) external {

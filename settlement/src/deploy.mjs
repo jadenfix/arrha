@@ -10,7 +10,7 @@ export async function deployEscrow(wallet,artifact,profile) {
   const ef=new ContractFactory(artifact.abi,artifact.evm.bytecode.object,wallet);
   const escrow=await ef.deploy(profile.asset,profile.decimals,BigInt(profile.maxPerRun),BigInt(profile.maxOutstanding));await escrow.waitForDeployment();
   const receipt=await escrow.deploymentTransaction().wait();
-  return {schemaVersion:1,protocolVersion:'1',chainId,escrow:await escrow.getAddress(),asset:profile.asset,assetCodeHash:profile.assetCodeHash,decimals:profile.decimals,assetName:profile.assetName,deploymentBlock:receipt.blockNumber,deploymentTransaction:receipt.hash,runtimeHash:keccak256(await wallet.provider.getCode(await escrow.getAddress())),finality:'finalized',maxBackfillBlocks:100000,explorer:chainId===421614?'https://sepolia.arbiscan.io':'',qualification:'unreviewed test deployment; no real funds'};
+  return {schemaVersion:1,protocolVersion:'1',chainId,escrow:await escrow.getAddress(),asset:profile.asset,assetCodeHash:profile.assetCodeHash,decimals:profile.decimals,maxPerRun:String(profile.maxPerRun),maxOutstanding:String(profile.maxOutstanding),assetName:profile.assetName,deploymentBlock:receipt.blockNumber,deploymentTransaction:receipt.hash,runtimeHash:keccak256(await wallet.provider.getCode(await escrow.getAddress())),finality:'finalized',maxBackfillBlocks:100000,explorer:chainId===421614?'https://sepolia.arbiscan.io':'',qualification:'unreviewed test deployment; no real funds'};
 }
 export async function deployTest(wallet,artifacts) {
   const chainId=Number(await wallet.provider.send('eth_chainId',[]));

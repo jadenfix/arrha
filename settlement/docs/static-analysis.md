@@ -33,3 +33,10 @@ Solana Cargo audit separately reports zero vulnerability entries and three
 transitive informational warnings. See status.md. Static tools and author triage
 cannot close the independent contract, SDK, browser, service and key-custody
 review gate. Mainnet remains disabled by the deployment helper.
+
+The current source also rejects tokens that credit the exact escrow amount while
+charging the payer an additional fee. An executed old-bytecode negative control
+authorized 1,000,000 units but debited 1,000,001. The current deployed-contract
+E2E rejects that funding atomically, preserving payer balance, nonce and zero
+liabilities. Existing v1 test deployments are historical; use a newly qualified
+deployment for this strict-debit revision. No proxy upgrade is possible.

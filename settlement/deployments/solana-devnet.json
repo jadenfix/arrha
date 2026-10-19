@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "network": "Solana devnet",
+  "genesis": "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+  "program": "3nf8gyJnj2aSLyeERjAysJTHCSjuBcxUA2giH8ZXS4hu",
+  "mint": "D8Q4NwWQTBdDe3cTdyFtkCh3EZpiuEvP9fN3KiSVb8ZU",
+  "assetName": "aTEST fixture, not USDC; no monetary value",
+  "decimals": 6,
+  "maxPerRun": "1000000",
+  "maxOutstanding": "10000000",
+  "upgradeAuthority": "6oRGKsgso5kyNeP4apXWrt8yYSQDFCZ87bGBV1jj3aMX",
+  "expectedBinarySha256": "50f69e24809172007a32153ab2494084fecc549efddd2099f7981ef98414680a",
+  "binaryBytes": 370984,
+  "minimumProgramDataRentLamports": "1885477560",
+  "minimumBufferRentLamports": "1885436920",
+  "feature": "devnet",
+  "qualification": "Finalized devnet deployment and SDK payout/refund/dispute, expiry recovery and restart journeys; local image and authority verified; independent review and mainnet pending",
+  "programDataHash": "50f69e24809172007a32153ab2494084fecc549efddd2099f7981ef98414680a",
+  "programDataAccount": "BwttgH1urp5t8HsfPYouNpdK4RU3C9CEwjBZZbS4vTD9",
+  "deploymentSignature": "5HiLJueXokGKN5Ls7ghbZfSinbnZ7F5ewpCyeEsFTE91yPycjxD7ZDKzAiuuoZFh1QnaUBaeL8un6vCtGBuhMKBZ",
+  "deploymentSlot": "512727686",
+  "finality": "finalized",
+  "compiler": {
+    "cargoBuildSbf": "4.4.0",
+    "platformTools": "1.57",
+    "anchor": "0.32.1",
+    "feature": "devnet"
+  }
+}

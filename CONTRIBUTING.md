@@ -25,7 +25,9 @@ networks first; use `KEEP_DEVNET_DATA=1 ./cli-test` to retain its logs/state. Se
 [testing](docs/testing.md) for the evidence boundaries.
 
 Add or extend an E2E journey when behavior changes. Keep the test suite focused
-on complete flows; do not reintroduce unit/property/JS/Python test runners.
+on complete flows; do not reintroduce unit/property suites. The independent `settlement/` package
+uses Node's built-in runner for complete deployed EVM/service/browser journeys;
+it does not replace the original L1 E2E policy.
 Use build checks for compile/type correctness, benchmarks for performance,
 and fuzzing as a separate exploration tool.
 

@@ -101,6 +101,14 @@ Turbine and Reed-Solomon erasure-coding libraries exist. The running node curren
 ### Observability
 The node starts a Prometheus exporter and provides structured tracing and RPC health/readiness endpoints. Grafana deployment assets are available separately. The gRPC firehose remains an in-process broadcast library. The standalone indexer polls finalized blocks from a configured node RPC, pins the chain identity and latest-block checkpoint in RocksDB, and serves persisted block summaries; it does not index pending execution.
 
+## Independent settlement product
+
+The [EVM settlement package](settlement/README.md) adds signed agent-work
+escrow on existing EVM networks without depending on this L1. Local deployed
+contract, SDK, persistent-service and browser E2E journeys are implemented.
+Public testnet, independent review, mainnet, Solana and Bitcoin remain separate
+open gates; this is not a production launch.
+
 ## Quick Start
 
 **Prerequisites:** current stable Rust with Cargo, a C/C++ compiler and libclang for RocksDB, Git, Bash, curl, and Python 3. Node.js 20+ and npm are optional for web/TypeScript builds. Workspace package metadata declares Rust 1.86; CI follows stable Rust. See [Getting Started](GETTING_STARTED.md) for setup.

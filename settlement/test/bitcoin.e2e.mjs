@@ -1,0 +1,45 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {createServer} from 'node:net';
+import {mkdtempSync,mkdirSync,readFileSync,rmSync} from 'node:fs';
+import {resolve} from 'node:path';
+import {Store} from '../src/store.mjs';
+import {BitcoinRpc,BitcoinPayments} from '../src/bitcoin.mjs';
+import {id} from 'ethers';
+
+test('Bitcoin Core regtest: native payments, exact satoshis, durable replay and canonical reorg recovery',{timeout:120000},async t=>{
+ if(!process.env.ARRHA_BITCOIND)throw Error('Set ARRHA_BITCOIND to a verified Bitcoin Core executable');
+ const dir=mkdtempSync(resolve(import.meta.dirname,'../.local-test-bitcoin-'));
+ const port=await new Promise(r=>{const s=createServer();s.listen(0,'127.0.0.1',()=>{const p=s.address().port;s.close(()=>r(p));});});
+ const child=spawn(process.env.ARRHA_BITCOIND,[`-datadir=${dir}`,'-regtest','-server','-listen=0','-dnsseed=0','-connect=0','-printtoconsole=0',`-rpcport=${port}`],{stdio:'ignore'});
+ let rpc,store; t.after(async()=>{try{await rpc?.call('stop');}catch{child.kill();}await new Promise(r=>{if(child.exitCode!==null)r();else child.once('exit',r);});store?.close();rmSync(dir,{recursive:true,force:true});});
+ for(let i=0;i<200;i++){try{rpc=new BitcoinRpc(`http://127.0.0.1:${port}`,readFileSync(`${dir}/regtest/.cookie`,'utf8').trim());await rpc.call('getblockchaininfo');break;}catch{await new Promise(r=>setTimeout(r,50));}}
+ await rpc.call('createwallet',['payer']);await rpc.call('createwallet',['provider']);
+ const payerRpc=new BitcoinRpc(`${rpc.url}/wallet/payer`,rpc.cookie),providerRpc=new BitcoinRpc(`${rpc.url}/wallet/provider`,rpc.cookie);
+ const mining=await payerRpc.call('getnewaddress');await rpc.call('generatetoaddress',[101,mining]);
+ store=new Store(`${dir}/payments.sqlite`);const genesis=await rpc.call('getblockhash',[0]),profile={network:'regtest',genesis,confirmations:2};
+ let payer=new BitcoinPayments(store,payerRpc,profile),recipient=new BitcoinPayments(store,providerRpc,profile);
+ const request=await recipient.request({runId:'btc-run-1',agreementHash:id('agreed-work'),amountSats:'123456',expiresAt:Math.floor(Date.now()/1000)+3600});
+ const op=await payer.preparePayment('one-payment',request,{maxSats:'130000'});
+ assert.equal(op.state,'Signed');assert.equal((await recipient.observe(request)).state,'Pending');
+ // Actual broadcast with no journal status update, then restart both adapter instances.
+ const raw=store.db.prepare('SELECT raw FROM btc_operations WHERE id=?').get('one-payment').raw;
+ assert.equal(await payerRpc.call('sendrawtransaction',[raw]),op.txid);store.close();store=new Store(`${dir}/payments.sqlite`);
+ payer=new BitcoinPayments(store,payerRpc,profile);recipient=new BitcoinPayments(store,providerRpc,profile);
+ assert.equal((await payer.broadcast('one-payment')).txid,op.txid);
+ assert.equal((await recipient.observe(request)).state,'Pending');
+ await rpc.call('generatetoaddress',[2,mining]);
+ await assert.rejects(recipient.observe({...request,amountSats:'1'}));
+ const paid=await recipient.observe(request);assert.equal(paid.state,'Paid');assert.equal(paid.confirmedSats,'123456');assert.equal(paid.payments.length,1);
+ await assert.rejects(payer.preparePayment('duplicate-payment',request,{maxSats:'130000'}));
+ assert.equal((await payer.preparePayment('one-payment',request,{maxSats:'130000'})).txid,op.txid);
+ await assert.rejects(payer.preparePayment('tampered',{...request,amountSats:'999999'},{maxSats:'1000000'}));
+ const wrong=new BitcoinPayments(store,providerRpc,{...profile,genesis:'0'.repeat(64)});await assert.rejects(wrong.observe(request));
+ const orphan=paid.payments[0].blockHash;await rpc.call('invalidateblock',[orphan]);assert.equal((await recipient.observe(request)).state,'Pending');
+ await rpc.call('reconsiderblock',[orphan]);assert.equal((await recipient.observe(request)).state,'Paid');
+ const expired={...request,runId:'expired',expiresAt:1};delete expired.requestHash;
+ const {createHash}=await import('node:crypto');const {json}=await import('../src/protocol.mjs');expired.requestHash=createHash('sha256').update(json(expired)).digest('hex');
+ await assert.rejects(payer.preparePayment('expired',expired,{maxSats:'130000'}));
+ console.log(JSON.stringify({network:'regtest',genesis,txid:op.txid,amountSats:paid.confirmedSats,confirmations:paid.requiredConfirmations,duplicatePayments:0,reorganizationRecovered:true}));
+});

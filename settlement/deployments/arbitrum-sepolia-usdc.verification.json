@@ -1,0 +1,16 @@
+{
+  "provider": "Sourcify v2",
+  "contract": {
+    "match": "exact_match",
+    "creationMatch": "exact_match",
+    "runtimeMatch": "exact_match",
+    "chainId": "421614",
+    "address": "0xc4a9e0594FaAbE346BcfB963B551a7aE5c38d0cf",
+    "verifiedAt": "2026-10-19T07:20:56Z",
+    "matchId": "56532391"
+  },
+  "verificationId": "7d78d102-0c1b-4191-ad5a-877c363fafe3",
+  "url": "https://repo.sourcify.dev/421614/0xc4a9e0594FaAbE346BcfB963B551a7aE5c38d0cf",
+  "securityReview": false,
+  "explorerMirroring": "Arbiscan not indexed at submission; Blockscout rejected API request (403)"
+}

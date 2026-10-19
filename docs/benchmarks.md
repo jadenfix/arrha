@@ -1,6 +1,9 @@
 # Devnet benchmarks
 
-Measured 2026-10-18 at commit `ed0961e` with `scripts/bench/run-benchmarks.sh`.
+Historical measurements from **2026-10-18**, at commit `ed0961e`, using
+`scripts/bench/run-benchmarks.sh`. These numbers have not been remeasured after
+the cleanup merged in PR #413; source/documentation updates do not refresh
+performance evidence.
 Raw results are in [`bench/results/`](../bench/results/) and the summary is in
 [`bench/results/summary.json`](../bench/results/summary.json).
 
@@ -15,7 +18,7 @@ or a test with real users. Loopback latency is close to zero and all four valida
 share one CPU with the load generator. Do not compare these numbers with production
 networks as if they were like-for-like.
 
-## Protocol parameters that shape the numbers
+## Parameters at the measured revision
 
 | parameter | value |
 |---|---|
@@ -50,7 +53,7 @@ finalized.
 | 400 | 16,000 / 16,000 | 0 | 2.05 s | 5.90 s | 8.38 s |
 | 500 | 20,000 / 20,000 | 0 | 3.17 s | 24.5 s | 34.7 s |
 
-**Sustained throughput: about 400 transfers/s.** At 500 tx/s blocks are full
+**Observed stable offered rate in these short runs: about 400 transfers/s.** At 500 tx/s blocks are full
 (462 tx mean) and a queue builds (p95 24.5 s), so 500 is above capacity.
 
 ### WASM contract calls (counter contract, `examples/contracts/counter.wat`)
@@ -62,8 +65,9 @@ finalized.
 | 100 | 4,000 / 4,000 | 0 | 2.62 s | 8.70 s | 12.1 s |
 | 150 | 6,000 / 6,000 | 0 | 3.66 s | 30.1 s | 35.6 s |
 
-**Sustained throughput: about 100 contract calls/s**, limited by the 100-call-per-block
-gas budget, not by WASM execution time.
+**Observed stable offered rate in these short runs: about 100 contract calls/s.**
+The declared gas budget caps calls per block; this sweep does not isolate WASM
+execution time or prove the only system bottleneck.
 
 ### Block time and finality on an idle network (60 s, no load)
 
@@ -92,7 +96,7 @@ gas budget, not by WASM execution time.
 | batch (random linear combination, distinct messages) | 12,324 (5.8x) |
 | aggregate, same message (how quorum certificates are checked) | 8,415 incl. aggregation |
 
-## Known limitations
+## Limitations recorded for the measured revision
 
 * Epoch-boundary reward distribution (every 43,200 slots, about 6 h on devnet) still
   writes balances outside of blocks; none of these runs reached an epoch boundary.
@@ -104,7 +108,15 @@ gas budget, not by WASM execution time.
 ## Reproduce
 
 ```bash
-cargo build --release -p aether-node -p aether-cli -p aether-loadgen --bins
-./scripts/bench/run-benchmarks.sh            # ~20 min; writes bench/results/
-python3 scripts/bench/summarize.py bench/results
+CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 \
+  cargo build --release -p aether-node -p aether-cli -p aether-loadgen --bins
+OUT_DIR="$PWD/work/bench-results" ./scripts/bench/run-benchmarks.sh
+python3 scripts/bench/summarize.py work/bench-results
 ```
+
+The driver cleans its `DEVNET_DIR` for each scenario, uses RPC ports 8545–8548,
+and stops the benchmark devnet on exit. Stop other users of those ports first.
+Keep the checked-in `bench/results/` as historical evidence; the command above
+writes fresh output separately. Capture the new commit, compiler, hardware and
+settings alongside any replacement measurements. No benchmark was executed
+for this documentation revision.

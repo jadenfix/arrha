@@ -1,6 +1,6 @@
 ---
 name: systems-engineering
-description: Rigorous systems engineering and technology selection for jadenfix/aether. Use when choosing architecture, language, framework, algorithm, data model, runtime, protocol boundary, optimization strategy, or security/resource-control design, especially when the result must be materially better than the current approach.
+description: Rigorous systems engineering and technology selection for jadenfix/arrha. Use when choosing architecture, language, framework, algorithm, data model, runtime, protocol boundary, optimization strategy, or security/resource-control design, especially when the result must be materially better than the current approach.
 ---
 
 # aether systems engineering

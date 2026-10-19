@@ -2,7 +2,12 @@
 
 Current source wiring is documented in [architecture](docs/architecture.md).
 The local node supports transfers and WASM contracts, multi-validator consensus,
-and finalized persistence. These are prototype capabilities, not mainnet qualification.
+and finalized persistence. The E2E runner exercises these on one machine. See
+[validation](docs/testing.md) for exact coverage and boundaries. These are
+prototype capabilities, not mainnet qualification.
+
+This is a forward work queue, not a dated delivery commitment or a checklist
+that treats source presence as completed integration.
 
 ## Protocol and deployment
 
@@ -11,6 +16,7 @@ and finalized persistence. These are prototype capabilities, not mainnet qualifi
 - Review consensus, cryptographic, runtime, and storage boundaries independently.
 - Validate Compose/Helm/Kubernetes/Terraform environments before documenting
   them as supported deployments.
+- Establish an MSRV 1.86 compatibility check; CI currently uses stable Rust.
 - Design reproducible tagged artifacts and operator-reviewed rollouts; CI currently
   builds but does not publish or deploy.
 
@@ -31,3 +37,8 @@ and finalized persistence. These are prototype capabilities, not mainnet qualifi
 Maintain an E2E-only test suite, static Rust/web builds, and source-linked docs.
 Add browser/provider journeys when those systems become operational. Preserve
 benchmark and fuzz tools separately, with explicit environment and evidence limits.
+
+For each completed item, update the architecture and relevant user guide with
+the actual call path, runnable command, revision, and executed journey. Track
+current assignments in [TASKS.md](TASKS.md) and handoffs in
+[PROGRESS.md](PROGRESS.md).

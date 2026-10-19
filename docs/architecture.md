@@ -1,9 +1,11 @@
 # Arrha / Aether architecture
 
-Source audit: **2026-10-18**, against `main` at
-`390dd0c5180f1ccf59b1e31ac62dc965383e67a4` (PR #412).
+Source audit: **2026-10-18**, against the implementation baseline
+`b5460e8` on `main` (merged cleanup PR #413).
 Arrha is the repository name; Rust packages, binaries, and protocol names still use Aether.
-This audit describes that baseline plus this cleanup: the print-only AI runtime, unused feature-gate registry, and obsolete test/phase assets have been removed. It is not a production qualification.
+The baseline removes the print-only AI runtime, unused feature-gate registry,
+alternative consensus engines, and obsolete test/phase assets. This is a source
+map, not a production qualification.
 
 ## Running node and component boundaries
 
@@ -12,7 +14,7 @@ Separate library components are listed below the diagram, with their integration
 
 ```mermaid
 flowchart LR
-    Clients["CLI / SDKs / apps"] --> RPC["JSON-RPC<br/>WebSocket surface"]
+    Clients["aetherctl / Rust chain SDK"] --> RPC["JSON-RPC / health<br/>WebSocket surface"]
     RPC <--> Core
     subgraph Node["aether-node"]
         Core["Node coordinator<br/>Mempool + slot loop<br/>VRF / BLS / 2-chain consensus"]
@@ -34,7 +36,9 @@ flowchart LR
 2. Wall-clock slots drive VRF leader eligibility and block proposals. The node
    executes candidate transactions against the selected parent's state, which may
    itself be a pending branch. Received proposals are also executed and their
-   state and receipt roots checked before acceptance.
+   state and receipt roots checked before acceptance. Proposals normally require
+   a parent QC; the validation bootstrap exception is `slot <= 1` or a zero
+   parent hash (`Node::on_block_received`).
 3. `Ledger::apply_block_on` verifies transaction signatures in a batch and then
    applies transactions **sequentially**. Transfers, UTxO updates, and WASM
    deployment/calls use overlays. `WasmExecutor` supplies Wasmtime with fuel,
@@ -51,7 +55,11 @@ flowchart LR
    `commit_finalized` commit the finalized branch through `Ledger::commit_pending`,
    combining state changes, block/receipt data, metadata, and staking persistence
    in an atomic RocksDB batch. Pending branches are not written as finalized state.
-6. JSON-RPC exposes finalized and pending views, transaction status, blocks,
+6. Epoch transitions are a separate slot-loop path: reward/unbonding credits and
+   staking state use their own atomic storage batch outside block execution.
+   Atomic block finalization alone is not proof that epoch scheduling is safe
+   under partitions or restart.
+7. JSON-RPC exposes finalized and pending views, transaction status, blocks,
    accounts, and contract storage. Callers must distinguish included from finalized.
 
 ## Source map
@@ -85,12 +93,14 @@ flowchart LR
 | QUIC, Turbine, erasure coding (`crates/networking`, `crates/da`) | Separate libraries; the binary uses `aether-p2p` over TCP and broadcasts whole blocks. Shred events are recognized but the node decoder returns no node message for them; there is no reassembly integration in this path. |
 | gRPC firehose (`crates/rpc/grpc-firehose`) | `FirehoseServer` currently wraps an in-process Tokio broadcast channel. The node does not start a gRPC firehose listener. |
 | Indexer (`crates/tools/indexer`) | Query/store/ingestion code exists, but its executable creates its own local firehose rather than connecting to a node. Do not draw a live finalized-block feed to it. |
-| AI mesh and TEE/VCR/KZG verifiers | Separate service/library code; The print-only AI runtime executable has been removed. The node does not assemble an end-to-end attested inference and settlement service. |
+| AI mesh and TEE/VCR/KZG verifiers | Separate service/library code. The TEE verifier rejects non-simulation reports because certificate-chain verification is unimplemented. The print-only AI runtime executable was removed; no end-to-end attested inference/settlement service is assembled. |
 | Native program crates | Staking logic is used by the node. Other program libraries must not be represented as a universal node dispatch path: ledger contract dispatch explicitly handles deploy/call IDs, with transfer and UTxO handling alongside it. |
 | Agent settlement / sibling projects | The [ecosystem design](ecosystem/aether-agent-settlement.md) describes intended compatibility and gaps. Verify matching producer and consumer implementations before treating a bridge as active. |
 
-This distinction corrects the earlier context diagram, which grouped JSON-RPC
-with gRPC and P2P with QUIC/DA, and implied all of them formed one running pipeline.
+Agent-run escrow and account-abstraction are reusable libraries, not native
+ledger dispatch targets in this binary. `AgentRunEscrowState` keeps accounting
+maps; authenticating callers, actual token debits, persistence and atomic
+settlement require integration beyond those maps.
 
 ## Deployment and verification surfaces
 
@@ -108,7 +118,8 @@ The current [CI definition](../.github/workflows/ci.yml) includes formatting,
 Clippy, a dependency audit (allowed to fail), in-process E2E, TypeScript workspace builds, Linux release builds, a Docker image build, scoped in-process node
 integration tests, and a four-process devnet E2E job. The devnet script checks
 finality, transfers, WASM contracts, validator loss, and restart/catch-up.
-The integration job no longer brings up Compose; obsolete phase acceptance scripts have been removed. The workflow does not publish artifacts or deploy a network.
+The integration job no longer brings up Compose; obsolete phase acceptance scripts have been removed. The workflow uploads devnet logs on failure; it does not publish release
+artifacts or deploy a network.
 See [testing](testing.md) for the E2E-only suite and its evidence limits.
 
 The README's benchmark results are explicitly a four-process, single-machine

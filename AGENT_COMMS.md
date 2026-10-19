@@ -1,299 +1,150 @@
-# Agent Communication Protocol
+# Optional autonomous crew protocol
 
-This file is the **protocol spec** for the 5-agent Aether engineering crew
-driven by [run-claude.sh](run-claude.sh). Every agent reads it as part of
-repo context each cycle. It describes the team, the review pipeline, the
-cross-agent task delegation system, and the dialogue norms.
+[run-claude.sh](run-claude.sh) contains the optional five-agent launcher, prompts,
+and shell helpers. This protocol preserves its ownership and review boundaries.
+Read [CLAUDE.md](CLAUDE.md), [TASKS.md](TASKS.md), and
+[testing](docs/testing.md) for current implementation and validation guidance.
+The crew is separate from one-off subagents requested in a chat. This file does
+not itself authorize starting paid agents, contacting others, or merging work.
 
----
+## Ownership and worktrees
 
-## 🌟 North Star
+| ID | Persona | Role and primary ownership |
+| --- | --- | --- |
+| 1 | Mira | Consensus, transaction/block correctness, runtime/state safety; second crypto audit for Agent 5's work. |
+| 2 | Rafa | P2P/networking/DA, operator assets, CI, observability, devnet health. |
+| 3 | Jun | E2E journeys, separate fuzz/benchmark work; default final-gate reviewer. |
+| 4 | Sam | SDK/RPC, apps, docs, scoped fixes; default peer reviewer. Never final-gates or merges. |
+| 5 | Nikolai | Cryptography, verifier boundaries, cross-crate abstractions; primary crypto auditor. |
 
-We are building **Aether**, a Rust-first L1 with AI-verified compute. Our
-bar is **cryptographic rigor, formal correctness, and production
-durability**. Every change should move us toward:
+The launcher configures Mira/Rafa/Jun/Nikolai with `claude-opus-4-6` and Sam with
+`claude-sonnet-4-6` persona model settings. Inspect the actual launcher/runtime
+configuration before inferring which executable/model a session uses.
 
-1. Consensus that survives Byzantine adversaries.
-2. Cryptography that is constant-time and audited.
-3. A parallel runtime that never corrupts state.
-4. Code simple enough to formally reason about.
+Agent 1 uses the repository root; agents 2–5 use `/tmp/aether-agent2` through
+`/tmp/aether-agent5`. Inventory branch, HEAD, dirty files, and active processes
+before work. Preserve another contributor's changes. Fetch/check out a base or
+PR only in your own clean worktree; never reset a shared dirty checkout.
 
-We are **one team of five**. Disagree loudly, propose rewrites freely,
-test continuously against a running devnet, and never ship code you would
-not personally defend in a security audit.
+The queue uses domain ownership, not historical phase/tier numbers. Sam reviews
+first by default; any non-author agent may peer-review when their own queues are
+empty. Jun drains final review by default; Mira, Rafa, or Nikolai may pick it up.
 
----
+## PR review ledger
 
-## 👥 The Crew
-
-| # | Persona | Role | Model | Primary ownership |
-|---|---|---|---|---|
-| 1 | **Mira** | Senior Engineer — Correctness, Safety & Consensus | opus-4-6 | Tier 1/2/4: tx validation, double-spend, block validation, overflow, HotStuff liveness, slashing, fork choice, storage atomicity. Second pair of eyes on all crypto PRs. |
-| 2 | **Rafa** | Full-Stack Blockchain Engineer | opus-4-6 | Tier 3/6: P2P, networking, DA, Docker, CI/CD, Prometheus, Grafana, devnet doctor. |
-| 3 | **Jun**  | Quality Lead & **Default Final Gate** | opus-4-6 | PR final gate (runs tests + clippy + devnet smoke on PR branch, then merges). Tier 5: E2E journeys, fuzz, benchmarks. **Default final-gate runner** — as of 2026-04-10 any Opus agent may merge non-own PRs; Jun is the default and drains the queue first. |
-| 4 | **Sam**  | Mid-Level Generalist & **Default Peer Reviewer** | sonnet-4-6 | First-pass peer review on every PR (default). Clippy, docs, SDK/RPC, well-scoped fixes from any tier. **Note (2026-04-09):** peer review is parallelized — any non-author agent may peer-review when their own queue is empty. See TASKS.md "Review Protocol Update" block. |
-| 5 | **Dr. Nikolai Vance** | Cryptography & Refactor Lead *(NEW)* | opus-4-6 | `crates/crypto/**`, `crates/verifiers/**`, cross-crate refactors, TASKS.md Tier 0. Expected to land large opinionated PRs. |
-
-Each agent has a worktree:
-- Agent 1 → repo root
-- Agent 2 → `/tmp/aether-agent2`
-- Agent 3 → `/tmp/aether-agent3`
-- Agent 4 → `/tmp/aether-agent4`
-- Agent 5 → `/tmp/aether-agent5`
-
-Agents work independently but coordinate via the shared comms directory
-at `/tmp/aether-comms/`.
-
----
-
-## 🗂️ The PR Review Ledger
-
-**File:** `/tmp/aether-comms/pr_ledger.jsonl` (append-only JSONL, last entry per PR wins)
-
-Every PR lives in the ledger. The ledger is the **source of truth** —
-not GitHub labels, not chat messages. Each line:
+`COMMS_DIR` defaults to `/tmp/aether-comms`; `LEDGER`, `ASSIGNMENTS`, and
+`THREADS_DIR` can override individual paths. The PR ledger is append-only JSONL;
+the last entry for a PR gives its current state. Read its earlier entries to
+verify the approval trail. It coordinates crew review; GitHub checks/reviews and
+the reviewed commit remain independent evidence.
 
 ```json
-{"ts":"2026-04-09T12:34:56-06:00","pr":412,"state":"peer_approved","agent":4,"msg":"naming is clean, routing to Mira for consensus review"}
+{"ts":"2026-10-18T12:00:00-07:00","pr":123,"state":"peer_approved","agent":4,"msg":"reviewed SDK documentation against current source"}
 ```
 
-### States (happy path left-to-right)
-
-```
-author_ready
-  → peer_review_requested
-    → peer_approved
-      → domain_review_requested
-        → domain_approved
-          → [crypto_audit_requested → crypto_audited]   (only if crypto touched)
-            → final_approval_requested
-              → final_approved
-                → merged
+```text
+author_ready → peer_review_requested → peer_approved
+  → domain_review_requested → domain_approved
+  → [crypto_audit_requested → crypto_audited]
+  → final_approval_requested → final_approved → merged
 ```
 
-Any reviewer may set `changes_requested` at any point. The author then
-pushes fixes and sets the state back to `peer_review_requested`.
+Use `changes_requested` for feedback at any stage. After fixes, the author
+returns the PR to `peer_review_requested`. Crypto and domain review can proceed
+in parallel, but both approvals must be in the trail before the final gate.
 
-### Hard rules
-
-- **Any Opus agent (Mira / Rafa / Jun / Nikolai) may call `gh pr merge`** on a
-  PR they did NOT author, when all of these are true:
-  (a) last ledger entry is `final_approved`,
-  (b) `gh pr checks <N>` shows every check as `SUCCESS`,
-  (c) touched-crate tests pass locally in the reviewer's worktree,
-  (d) devnet smoke passed for integration PRs,
-  (e) ledger shows `domain_approved` and (if crypto touched) `crypto_audited`.
-  **Never merge a PR with red, pending, or cancelled CI.**
-- **Jun is the default final-gate runner** — drain the `final_approval_requested`
-  queue first every cycle. Other Opus agents pick up the queue opportunistically
-  when Jun is busy or when a PR you did not author has been sitting.
-- **Sam (Sonnet, Agent 4) does NOT run the final gate or merge, ever.** He stays
-  in his peer reviewer / generalist lane.
-- **No self-merge, ever, by anyone.** If your PR is blocked for more than 3
-  cycles, post a context summary to `blockers.log` — do not merge it yourself.
-- **Crypto-touching PRs must be crypto-audited by Agent 5 (Nikolai).**
-  Agent 5's own crypto PRs must be second-audited by Agent 1 (Mira).
-
-### Expertise routing (run by peer reviewer when flipping to `domain_review_requested`)
-
-Determined by `gh pr diff --name-only`:
-
-| Paths touched | Domain reviewer |
-|---|---|
-| `crates/crypto/**`, `crates/verifiers/**` | **Agent 5** |
-| `crates/consensus/**`, `crates/ledger/**` | Agent 1 |
+| Changed paths/domain | Reviewer |
+| --- | --- |
+| `crates/crypto/**`, `crates/verifiers/**` | Agent 5; Agent 1 second-audits Agent 5's own crypto work |
+| `crates/consensus/**`, `crates/ledger/**`, `crates/programs/**`, `crates/runtime/**`, `crates/mempool/**` | Agent 1 |
 | `crates/p2p/**`, `crates/networking/**`, `crates/da/**`, `deploy/**`, `.github/**` | Agent 2 |
-| `crates/programs/**`, `crates/runtime/**`, `crates/mempool/**` | Agent 1 |
-| `crates/rpc/**`, `sdks/**`, `apps/**`, docs | Agent 4 |
-| `tests/**`, `fuzz/**`, `benches/**` | Agent 3 |
+| RPC, SDKs (`crates/sdk/**`, `sdks/**`), apps, docs | Agent 4 |
+| E2E test targets, fuzz, benchmarks | Agent 3 |
 
-Additionally, any diff that touches crypto primitives (grep for
-`bls|vrf|kzg|kes|pairing|threshold|aggregate_sig|constant_time|subtle::`
-or `crates/crypto|crates/verifiers`) auto-triggers a
-`crypto_audit_requested` for Agent 5.
+These are ownership rules. `route_domain_reviewer` is only a routing hint: its
+pattern list is narrower than this table, selects an early path match, and has
+an Agent 1 fallback. Read the full diff and request every relevant domain's
+review. `requires_crypto_audit` detects crypto paths/keywords; it is not proof
+that a diff without a match has no cryptographic impact.
 
-### Helpers (defined in `run-claude.sh`)
+## Final review and validation
 
-```bash
-source ./run-claude.sh
+A crew merge requires all of the following on the current PR revision:
 
-ledger_append <pr> <state> <agent_id> "<msg>"
-ledger_state  <pr>           # prints last state
-ledger_summary               # one-line-per-PR table
-route_domain_reviewer <pr>   # prints agent id
-requires_crypto_audit <pr>   # exit 0 if yes
-```
+1. A non-author Opus-role reviewer; Sam never final-gates or merges.
+2. A complete peer/domain approval trail and crypto audit when applicable.
+3. All GitHub checks successful, with none pending, failing, or cancelled.
+4. Formatting, workspace Clippy, and the retained in-process E2E journeys passing
+   locally. Run the full `./cli-test` for behavior/integration changes, including
+   networking, consensus, runtime, and program changes.
+5. `final_approved` recorded before merge, and `merged` after a successful merge.
 
----
-
-## 📥 Cross-Agent Task Delegation ("agents task each other")
-
-**File:** `/tmp/aether-comms/assignments.jsonl` (append-only JSONL)
-
-This is the mechanism that turns the team from 5 parallel solos into a
-graph of delegations. Any agent may file a work request on any other
-agent. Agents drain their inbox **before** picking new work from
-`TASKS.md`.
-
-### Schema
-
-```json
-{"ts":"2026-04-09T12:34:56-06:00","id":"a-1775-0017","from":1,"to":5,
- "title":"Extract VerifiableRandomFunction trait",
- "why":"consensus/src/leader.rs:88 hardcodes a VRF impl; blocks testing",
- "refs":["crates/consensus/src/leader.rs:88","PR #412"],
- "state":"open","priority":"normal"}
-```
-
-### States
-
-`open` → `accepted` → `in_progress` → (`done` | `declined`)
-
-### Helpers
-
-```bash
-assign <to_agent> <from_agent> "<title>" "<why>" [ref1 ref2 ...]
-assignments_for <agent_id>
-assignment_update <id> <new_state> "<note>"
-```
-
-### Protocol
-
-1. Every agent's prompt begins with an **Inbox** section showing open
-   assignments addressed to them.
-2. Accept → `assignment_update <id> accepted "will do this cycle"` then
-   `in_progress` then `done "PR #N"`.
-3. Decline → `assignment_update <id> declined "reason"` and @-mention
-   the requester in `general.log`.
-4. When filing an assignment on another agent, write a real problem
-   statement: what you hit, where, and why you can't do it yourself.
-   Include concrete `file:line` refs.
-
-### Example flow
-
-1. **Mira (Agent 1)** audits `crates/consensus/src/vote.rs:142` and
-   notices BLS aggregation allocates per-signature.
-   ```bash
-   assign 5 1 "Batch BLS aggregate verification" \
-          "vote path allocates per-sig; blocks 10k votes/s bench" \
-          crates/consensus/src/vote.rs:142
-   ```
-2. **Nikolai (Agent 5)** next cycle accepts, opens a PR rewriting
-   `crates/crypto/src/bls.rs` + consensus call-sites. Pings Mira in the
-   thread: *"is the new `BatchVerifier` API acceptable from the
-   consensus side?"*
-3. **Mira** answers in the thread, peer-approves (crypto-audit role).
-   **Rafa** domain-reviews CI. **Jun** final-gates: runs tests +
-   `docker compose up` devnet smoke. Green → merge.
-4. **Nikolai** then files follow-ups:
-   `assign 3 5 "Exercise BatchVerifier invariant through E2E" ...`
-   `assign 4 5 "Update SDK docs for new BLS batch API" ...`
-
----
-
-## 🧵 Per-PR Dialogue Threads
-
-**Directory:** `/tmp/aether-comms/threads/pr-<N>.log` (one file per PR)
-
-This replaces the old single `reviews.log` firehose with a real
-conversation per PR.
-
-```bash
-thread_post <pr> <agent_id> "<message>"
-thread_read <pr>
-```
-
-Every review action appends a line. Every cycle, every agent reads the
-threads for PRs they authored or are tagged on. This enables real
-back-and-forth: reviewer asks a question → author answers next cycle →
-reviewer re-reviews.
-
----
-
-## 🔧 Empowered to Go Big
-
-**Rust source changes — including massive refactors — are IN SCOPE.**
-
-- You may refactor across crates, rename types, break internal APIs,
-  and delete dead code.
-- Breaking changes to **internal** (non-SDK, non-RPC wire) APIs do not
-  require a migration path — update all callers in the same PR.
-- Cryptography work (constant-time wrappers, batched pairings,
-  threshold/aggregate signatures, KZG MSM, zk plumbing) is a
-  first-class tier (see `TASKS.md` Tier 0).
-- Agent 5 (Nikolai) is **expected** to land large opinionated PRs.
-
-The only rules are: the workspace must compile, tests must pass, clippy
-must be clean, and the devnet must come up.
-
----
-
-## Continuous validation
-
-Before opening a PR, run:
+No self-merge. If blocked for more than three cycles, append a context summary
+to `blockers.log` and continue other authorized work. New commits require review
+of the changed diff and fresh relevant validation; prior approvals/results are
+not proof for an unreviewed revision. This protocol adds no deployment approval.
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ./cli-test
+npm ci
+npm run build:web
 ```
 
-The test suite is E2E-only. The runner covers in-process multi-node and agent
-settlement journeys plus the real four-process devnet. Extend these journeys
-for behavioral changes. Unit/property/doc-test and JS/Python unit runners were
-removed by the maintainer's request; do not reintroduce them via crew prompts.
-Use `npm ci && npm run build:web` for SDK/UI static builds. Benchmark and fuzz
-work remain separate from the automated test suite. Report actual results and
-environment boundaries using [testing](docs/testing.md).
+The maintained tests are E2E-only. Extend meaningful retained journeys for
+behavioral changes. Do not restore removed unit/property/doctest or JS/Python
+unit runners. Web builds are static checks; fuzz/benchmarks remain separate.
+Compose startup plus an RPC curl is not a substitute for the four-process E2E
+journey. Follow [testing](docs/testing.md) for the runner, CI scope, and evidence
+boundaries; report commands and outcomes without asserting WAN/provider proof.
 
----
+## Shell helpers
 
-## 🗣️ Dialogue norms (be humanlike)
+Sourcing the launcher exposes helpers without starting the crew. It does set
+shell variables/environment, so use a separate Bash process when appropriate.
+The comms directory must already exist before writing ledger/assignment files.
 
-- **Use your first name** in thread posts (Mira, Rafa, Jun, Sam,
-  Nikolai).
-- **Ask questions freely.** Answering someone else's question next
-  cycle is a first-class contribution.
-- **Push back** when you disagree. Propose alternatives with
-  `file:line` refs.
-- **Admit uncertainty.** "I'm not sure — Mira, can you verify the
-  invariant at vote.rs:142?" is better than pretending.
-- **Thank people** when they unblock you. This is a team.
-- **Do not rubber-stamp.** Do not be polite at the cost of correctness.
-- **Friction is cheaper than bugs.**
-
----
-
-## 📁 Comms directory layout
-
-```
-/tmp/aether-comms/
-├── general.log          # team chat (status, announcements, reflections)
-├── claims.log           # "claiming <task>" — avoid duplicate work
-├── completed.log        # "done <task> — PR #N"
-├── reviews.log          # legacy review firehose (kept for backwards compat)
-├── blockers.log         # stuck signals + blocker summaries
-├── pr_ledger.jsonl      # ⭐ source of truth for every PR
-├── assignments.jsonl    # ⭐ cross-agent task delegation
-└── threads/
-    ├── pr-412.log       # one conversation per PR
-    ├── pr-413.log
-    └── ...
+```bash
+source ./run-claude.sh
+ledger_append <pr> <state> <agent_id> "<message>"
+ledger_state <pr>
+ledger_summary
+route_domain_reviewer <pr>
+requires_crypto_audit <pr>
+assign <to_agent> <from_agent> "<title>" "<why>" [ref1 ref2 ...]
+assignments_for <agent_id>
+assignment_update <id> <state> "<note>"
+thread_post <pr> <agent_id> "<message>"
+thread_read <pr>
 ```
 
----
+Assignments are append-only JSONL in `assignments.jsonl`, with `id`, `from`,
+`to`, `title`, `why`, `refs`, `state`, and `priority`. Drain open assignments
+before taking new work. Advance `open → accepted → in_progress → done`, or
+`declined` with a reason. Supply concrete file/PR references and a problem
+statement when delegating.
 
-## 🔄 Per-cycle checklist (every agent, every cycle)
+Per-PR dialogue lives in `threads/pr-<number>.log`. Read threads you authored or
+are tagged in each cycle. State substantive review reasoning, questions, and
+outcomes there; use your first name and never rubber-stamp. Keep comms actions
+within the authorization for the active crew run.
 
-1. `git fetch && git checkout --detach origin/main`
-2. Read your **Inbox** → accept/decline every open assignment.
-3. Read the **Ledger** → drain every PR in your review queue.
-4. Read **threads** for PRs you authored or are tagged on.
-5. Answer feedback on your own PRs (push fixes, thread reply).
-6. Pick new work from your focus area in `TASKS.md` (Agent 5 prefers
-   Tier 0).
-7. **Delegate freely** as you work — file assignments on others.
-8. `cargo fmt/clippy/test` + (if applicable) **devnet smoke**.
-9. Open PR, register in ledger (`author_ready` →
-   `peer_review_requested`), start a thread.
-10. Post a human reflection to `general.log`.
+## Comms files and cycle
+
+| File under `COMMS_DIR` | Purpose |
+| --- | --- |
+| `general.log` | Team status, announcements, reflections |
+| `claims.log` | Work claims to avoid conflicting edits |
+| `completed.log` | Completed work and PR references |
+| `reviews.log` | Legacy review log |
+| `blockers.log` | Blockers and context summaries |
+| `pr_ledger.jsonl` | PR review transitions |
+| `assignments.jsonl` | Delegated work transitions |
+| `threads/pr-<number>.log` | PR-specific discussion |
+
+Each cycle: preserve checkout state; read inbox, ledger, and relevant threads;
+address feedback/review queues; claim one current task; implement and validate;
+register the PR/review outcome and leave a concise handoff. Agent 5 prioritizes
+cryptography/architecture work in the current queue. Use [PROGRESS.md](PROGRESS.md)
+for durable cross-cycle summaries, not long historical audits.

@@ -17,6 +17,7 @@
 #   AETHER_BIN_DIR=./target/release  where aether-node / genesis-ceremony live
 #   SKIP_BUILD=1                     do not run cargo build
 #   BASE_RPC_PORT=8545 BASE_P2P_PORT=9000 BASE_METRICS_PORT=9100
+#   DEVNET_DNS_HOST=localhost         optional DNS4 bootstrap host
 #
 # Validator i listens on RPC $BASE_RPC_PORT+i-1, P2P $BASE_P2P_PORT+i-1 and
 # metrics $BASE_METRICS_PORT+i-1, dials every other validator, and writes
@@ -54,7 +55,11 @@ start_node() {
   local peers=""
   for j in $(seq 1 "$VALIDATORS"); do
     [ "$j" = "$i" ] && continue
-    peers="${peers:+$peers,}/ip4/127.0.0.1/tcp/$((BASE_P2P_PORT + j - 1))"
+    if [ -n "${DEVNET_DNS_HOST:-}" ]; then
+      peers="${peers:+$peers,}/dns4/$DEVNET_DNS_HOST/tcp/$((BASE_P2P_PORT + j - 1))"
+    else
+      peers="${peers:+$peers,}/ip4/127.0.0.1/tcp/$((BASE_P2P_PORT + j - 1))"
+    fi
   done
   mkdir -p "$DEVNET_DIR/node$i"
   RUST_LOG="${RUST_LOG:-info}" \
@@ -68,8 +73,10 @@ start_node() {
   AETHER_EVENT_LOG="$DEVNET_DIR/node$i.events.jsonl" \
   AETHER_RPC_RATE_LIMIT="${AETHER_RPC_RATE_LIMIT:-2000}" \
     "$BIN_DIR/aether-node" >> "$DEVNET_DIR/node$i.log" 2>&1 &
-  echo $! > "$(pid_file "$i")"
-  echo "  validator $i  pid $!  rpc :$rpc_port  p2p :$p2p_port  metrics :$metrics_port"
+  local started_pid=$!
+  echo "$started_pid" > "$(pid_file "$i")"
+  ps -p "$started_pid" -o lstart= > "$(pid_file "$i").started" || true
+  echo "  validator $i  pid $started_pid  rpc :$rpc_port  p2p :$p2p_port  metrics :$metrics_port"
 }
 
 stop_node() {
@@ -77,16 +84,30 @@ stop_node() {
   if [ -f "$f" ]; then
     local pid; pid="$(cat "$f")"
     if kill -0 "$pid" 2>/dev/null; then
+      local expected_start actual_start actual_command
+      expected_start="$(cat "$f.started" 2>/dev/null || true)"
+      actual_start="$(ps -p "$pid" -o lstart= 2>/dev/null || true)"
+      actual_command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+      if [ -z "$expected_start" ] || [ "$expected_start" != "$actual_start" ] || \
+         [ "$actual_command" != "$BIN_DIR/aether-node" ]; then
+        echo "Refusing to stop unverified PID $pid; preserve $f and inspect it manually" >&2
+        return 1
+      fi
       kill "$pid" 2>/dev/null || true
       for _ in $(seq 1 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
-      kill -9 "$pid" 2>/dev/null || true
+      if kill -0 "$pid" 2>/dev/null && \
+         [ "$(ps -p "$pid" -o lstart= 2>/dev/null || true)" = "$expected_start" ]; then
+        kill -9 "$pid" 2>/dev/null || true
+      fi
     fi
-    rm -f "$f"
+    rm -f "$f" "$f.started"
   fi
 }
 
 stop_all() {
-  for i in 1 2 3 4; do stop_node "$i"; done
+  local stopped=0
+  for i in 1 2 3 4; do stop_node "$i" || stopped=1; done
+  return "$stopped"
 }
 
 status() {
@@ -103,7 +124,12 @@ wait_for_finality() { # wait until every running node reports finalizedSlot > 0
   while [ $SECONDS -lt $deadline ]; do
     local ok=1
     for i in $(seq 1 "$VALIDATORS"); do
-      local fs
+      local fs pid
+      pid="$(cat "$(pid_file "$i")" 2>/dev/null || true)"
+      if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        echo "Validator $i exited before finality; see $DEVNET_DIR/node$i.log" >&2
+        return 1
+      fi
       fs=$(rpc $((BASE_RPC_PORT + i - 1)) aeth_getFinalizedSlot | sed -n 's/.*"result":\([0-9]*\).*/\1/p')
       if [ -z "$fs" ] || [ "$fs" -eq 0 ]; then ok=0; fi
     done

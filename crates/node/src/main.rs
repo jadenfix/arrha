@@ -14,7 +14,7 @@ use aether_p2p::network::{P2PNetwork, TOPIC_SYNC, TOPIC_TX, TOPIC_VOTE};
 use aether_rpc_json::{JsonRpcServer, RpcBackend};
 use aether_runtime::{ExecutionContext, WasmVm};
 use aether_types::{Address, Block, ChainConfig, Transaction, TransactionReceipt, H256};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
 
@@ -59,6 +59,8 @@ impl ContractExecutor for WasmExecutor {
 }
 
 struct NodeRpcBackend {
+    genesis_hash: H256,
+    chain_identity: H256,
     node: Arc<RwLock<Node>>,
     airdrop_enabled: bool,
 }
@@ -303,10 +305,25 @@ impl RpcBackend for NodeRpcBackend {
                 let node = self.read_node()?;
                 Ok(serde_json::to_value(node.get_account_pending(address)?)?)
             })(),
+            "aeth_getFeeParameters" => (|| {
+                let node = self.read_node()?;
+                let config = node.chain_config();
+                Ok(json!({
+                    "a": config.fees.a.to_string(),
+                    "b": config.fees.b.to_string(),
+                    "c": config.fees.c.to_string(),
+                    "minBaseFee": config.fees.min_base_fee.to_string(),
+                    "chainId": config.chain.chain_id_numeric,
+                }))
+            })(),
             "aeth_getNodeInfo" => (|| {
                 let node = self.read_node()?;
                 let (tip, tip_slot) = node.finalized_tip();
                 Ok(json!({
+                    "genesisHash": hex0x(self.genesis_hash.as_bytes()),
+                    "chainIdentity": hex0x(self.chain_identity.as_bytes()),
+                    "chainId": node.chain_config().chain.chain_id_numeric,
+                    "protocolVersion": aether_types::PROTOCOL_VERSION,
                     "validator": node.validator_address().map(|a| hex0x(a.as_bytes())),
                     "currentSlot": node.current_slot(),
                     "finalizedSlot": tip_slot,
@@ -516,17 +533,37 @@ async fn main() -> Result<()> {
     tracing::info!("Aether Node v0.3.0");
     tracing::info!("=================\n");
 
-    // Load chain configuration
+    // Read shared genesis before selecting the runtime configuration. An
+    // operator's genesis parameters must not silently become the devnet preset.
+    let genesis_file: Option<GenesisConfig> = env::var("AETHER_GENESIS_PATH")
+        .ok()
+        .map(|path| -> Result<GenesisConfig> {
+            let bytes = std::fs::read(&path)
+                .with_context(|| format!("failed to read genesis file: {path}"))?;
+            let genesis: GenesisConfig =
+                serde_json::from_slice(&bytes).context("failed to parse genesis JSON")?;
+            genesis.validate()?;
+            Ok(genesis)
+        })
+        .transpose()?;
+
+    // Explicit configuration overrides genesis; otherwise use its parameters.
     let chain_config = if let Ok(config_path) = env::var("AETHER_CONFIG_PATH") {
         tracing::info!("Loading config from: {config_path}");
         ChainConfig::from_toml_file(Path::new(&config_path))?
+    } else if let Some(genesis) = genesis_file
+        .as_ref()
+        .filter(|_| env::var_os("AETHER_NETWORK").is_none())
+    {
+        genesis.chain_config.clone()
     } else {
         let network = env::var("AETHER_NETWORK").unwrap_or_else(|_| "devnet".to_string());
         tracing::info!("Using {network} preset config");
         match network.as_str() {
             "mainnet" => ChainConfig::mainnet(),
             "testnet" => ChainConfig::testnet(),
-            _ => ChainConfig::devnet(),
+            "devnet" => ChainConfig::devnet(),
+            other => bail!("unknown AETHER_NETWORK preset: {other}"),
         }
     };
 
@@ -550,57 +587,52 @@ async fn main() -> Result<()> {
     } else {
         tracing::info!("Generating new validator keypair...");
         let kp = ValidatorKeypair::generate();
-        // Auto-save so the node keeps the same identity on restart
-        if let Err(e) = kp.save_to_file(key_path) {
-            tracing::warn!(err = %e, "failed to save validator key");
-        } else {
-            tracing::info!(path = %key_path.display(), "Saved validator key");
+        // Persist the identity before opening the ledger or participating.
+        if let Some(parent) = key_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).context("creating validator key directory")?;
         }
+        kp.save_to_file(key_path)
+            .context("persisting generated validator identity")?;
+        tracing::info!(path = %key_path.display(), "Saved validator key");
         kp
     };
     let validator_address = validator_keypair.address();
 
     // Build consensus from genesis file (multi-validator) or single-validator mode
-    let mut genesis_file: Option<GenesisConfig> = None;
-    let consensus: Box<dyn aether_consensus::ConsensusEngine> =
-        if let Ok(genesis_path) = env::var("AETHER_GENESIS_PATH") {
-            tracing::info!(path = %genesis_path, "Loading genesis config");
-            let genesis_bytes = std::fs::read(&genesis_path)
-                .with_context(|| format!("failed to read genesis file: {genesis_path}"))?;
-            let genesis: GenesisConfig = serde_json::from_slice(&genesis_bytes)
-                .with_context(|| "failed to parse genesis JSON")?;
-            genesis.validate()?;
+    let consensus: Box<dyn aether_consensus::ConsensusEngine> = if let Some(genesis) = &genesis_file
+    {
+        let result = genesis.build();
+        let vrf_pubkeys = genesis.vrf_pubkeys();
+        let bls_pubkeys = genesis.bls_pubkeys();
 
-            let result = genesis.build();
-            let vrf_pubkeys = genesis.vrf_pubkeys();
-            let bls_pubkeys = genesis.bls_pubkeys();
+        tracing::info!(
+            validators = result.validator_set.len(),
+            total_stake = result.total_stake,
+            "Genesis config loaded"
+        );
 
-            tracing::info!(
-                validators = result.validator_set.len(),
-                total_stake = result.total_stake,
-                "Genesis config loaded"
-            );
-
-            let engine = create_hybrid_consensus_with_all_keys(
-                result.validator_set,
-                vrf_pubkeys,
-                bls_pubkeys,
-                Some(&validator_keypair),
-                chain_config.consensus.tau,
-                chain_config.chain.epoch_slots,
-            )?;
-            genesis_file = Some(genesis);
-            Box::new(engine)
-        } else {
-            // Single-validator quick-start mode
-            let validators = vec![validator_info_from_keypair(&validator_keypair, 1_000_000)];
-            Box::new(create_hybrid_consensus(
-                validators,
-                Some(&validator_keypair),
-                chain_config.consensus.tau,
-                chain_config.chain.epoch_slots,
-            )?)
-        };
+        let engine = create_hybrid_consensus_with_all_keys(
+            result.validator_set,
+            vrf_pubkeys,
+            bls_pubkeys,
+            Some(&validator_keypair),
+            chain_config.consensus.tau,
+            chain_config.chain.epoch_slots,
+        )?;
+        Box::new(engine)
+    } else {
+        // Single-validator quick-start mode
+        let validators = vec![validator_info_from_keypair(&validator_keypair, 1_000_000)];
+        Box::new(create_hybrid_consensus(
+            validators,
+            Some(&validator_keypair),
+            chain_config.consensus.tau,
+            chain_config.chain.epoch_slots,
+        )?)
+    };
 
     let rpc_port: u16 = env::var("AETHER_RPC_PORT")
         .ok()
@@ -659,6 +691,22 @@ async fn main() -> Result<()> {
         tracing::info!("Node already initialized, skipping genesis");
     }
     node.set_genesis_time_ms(genesis_time_ms);
+    // Bind the persisted state to both genesis and execution configuration.
+    use sha2::{Digest, Sha256};
+    let genesis_hash = match &genesis_file {
+        Some(genesis) => genesis.build().genesis_hash,
+        None => H256::from(<[u8; 32]>::from(Sha256::digest(bincode::serialize(&(
+            &genesis_accounts,
+            validator_address,
+            genesis_time_ms,
+        ))?))),
+    };
+    let chain_identity = H256::from(<[u8; 32]>::from(Sha256::digest(serde_json::to_vec(&(
+        chain_config.as_ref(),
+        genesis_hash,
+        genesis_file.as_ref(),
+    ))?)));
+    node.bind_chain_identity(chain_identity)?;
 
     // Set up P2P outbound channel with bounded capacity for backpressure.
     // If the P2P layer can't keep up, senders will drop messages rather than OOMing.
@@ -677,6 +725,8 @@ async fn main() -> Result<()> {
     let shared_node = Arc::new(RwLock::new(node));
 
     let backend = NodeRpcBackend {
+        genesis_hash,
+        chain_identity,
         node: shared_node.clone(),
         airdrop_enabled: !multi_validator,
     };
@@ -687,8 +737,13 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(50.0);
+    let rpc_bind_ip: std::net::IpAddr = env::var("AETHER_RPC_BIND_IP")
+        .unwrap_or_else(|_| "127.0.0.1".to_owned())
+        .parse()
+        .context("AETHER_RPC_BIND_IP must be an IP address")?;
     let rpc_server =
         JsonRpcServer::with_chain_id(backend, rpc_port, chain_config.chain.chain_id_numeric)
+            .with_bind_ip(rpc_bind_ip)
             .with_rate_limit((rpc_per_sec * 2.0) as u32, rpc_per_sec)
             .set_shutdown_signal(async move {
                 let mut rx = rpc_shutdown_rx;
@@ -710,7 +765,7 @@ async fn main() -> Result<()> {
     tracing::info!("Peer ID: {}", peer_id);
     tracing::info!("Consensus: VRF + HotStuff + BLS");
     tracing::info!("P2P listening on 0.0.0.0:{p2p_port}");
-    tracing::info!("JSON-RPC listening on 127.0.0.1:{rpc_port}");
+    tracing::info!("JSON-RPC listening on {rpc_bind_ip}:{rpc_port}");
     tracing::info!(
         "Slot duration: {}ms, Epoch: {} slots",
         chain_config.chain.slot_ms,
@@ -723,7 +778,7 @@ async fn main() -> Result<()> {
         for peer_addr in peers.split(',') {
             let addr = peer_addr.trim();
             if !addr.is_empty() {
-                match p2p.connect_peer(addr) {
+                match p2p.connect_peer(addr).await {
                     Ok(()) => tracing::info!("Connecting to peer: {addr}"),
                     Err(e) => tracing::warn!("Failed to connect to {addr}: {e}"),
                 }
@@ -736,7 +791,12 @@ async fn main() -> Result<()> {
         net_rx,
         shutdown_rx.clone(),
     ));
-    let rpc_task = tokio::spawn(async move { rpc_server.run().await });
+    // Poll the server on the runtime's main task. Warp's generic server future
+    // does not need to migrate between workers; connection handling remains
+    // asynchronous while the slot and P2P loops run on their own tasks.
+    let rpc_task = rpc_server.run();
+    tokio::pin!(rpc_task);
+    let mut rpc_finished = false;
     let p2p_task = tokio::spawn(run_p2p_outbound(p2p, outbound_rx, net_tx, shutdown_rx));
     let metrics_addr: std::net::SocketAddr = ([0, 0, 0, 0], metrics_port).into();
     let metrics_task = tokio::spawn(async move {
@@ -754,11 +814,9 @@ async fn main() -> Result<()> {
                 Err(e) => return Err(anyhow::anyhow!("slot loop task failed: {e}")),
             }
         }
-        res = rpc_task => {
-            match res {
-                Ok(inner) => inner?,
-                Err(e) => return Err(anyhow::anyhow!("rpc task failed: {e}")),
-            }
+        res = &mut rpc_task => {
+            rpc_finished = true;
+            res?;
         }
         res = p2p_task => {
             match res {
@@ -777,6 +835,12 @@ async fn main() -> Result<()> {
 
     // Signal all tasks to stop
     let _ = shutdown_tx.send(true);
+    if !rpc_finished {
+        match tokio::time::timeout(Duration::from_secs(2), &mut rpc_task).await {
+            Ok(result) => result.context("stopping JSON-RPC server")?,
+            Err(_) => tracing::warn!("JSON-RPC graceful shutdown deadline elapsed"),
+        }
+    }
 
     // Give tasks a short window to finish in-flight work
     tracing::info!("Waiting for tasks to finish...");

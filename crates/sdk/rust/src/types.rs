@@ -1,19 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use aether_types::{Address, H256};
+use aether_types::{Address, Block, H256};
 
-/// Summary of a block as returned by `aeth_getBlockByHash` / `aeth_getBlockByNumber`.
-/// Fields mirror the server's JSON serialization of `aether_types::Block`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct RpcBlock {
-    pub hash: H256,
-    pub parent_hash: H256,
-    pub slot: u64,
-    pub proposer: Address,
-    #[serde(default)]
-    pub transactions: Vec<Value>,
-}
+/// A block as returned by `aeth_getBlockByHash` / `aeth_getBlockByNumber`.
+/// The RPC response preserves the protocol's nested header structure.
+pub type RpcBlock = Block;
 
 /// Transaction receipt as returned by `aeth_getTransactionReceipt`.
 #[derive(Clone, Debug, Serialize, Deserialize)]

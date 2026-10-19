@@ -4,7 +4,13 @@ import time
 from dataclasses import dataclass
 from typing import Dict, Optional
 
-from .transaction import Transaction
+from .transaction import (
+    FeeParameters,
+    Keypair,
+    Transaction,
+    address_bytes,
+    calculate_transfer_fee,
+)
 from .types import (
     ClientConfig,
     JobRequest,
@@ -20,11 +26,10 @@ class TransferBuilder:
     _recipient: Optional[str] = None
     _amount: Optional[int] = None
     _memo: Optional[str] = None
-    _fee: int = 0
+    _fee: Optional[int] = None
     _gas_limit: int = 0
 
     def __post_init__(self) -> None:
-        self._fee = self.config.default_fee
         self._gas_limit = self.config.default_gas_limit
 
     def to(self, recipient: str) -> "TransferBuilder":
@@ -54,26 +59,40 @@ class TransferBuilder:
     def build(
         self,
         *,
-        sender: str,
-        sender_public_key: str,
-        signature: str,
+        keypair: Keypair,
+        chain_id: int,
         nonce: int,
+        fee_parameters: Optional[FeeParameters] = None,
     ) -> Transaction:
         if self._recipient is None:
             raise ValueError("recipient not set")
         if self._amount is None:
             raise ValueError("amount not set")
 
-        return Transaction(
-            nonce=nonce,
-            sender=sender,
-            sender_public_key=sender_public_key,
-            recipient=self._recipient,
+        recipient = address_bytes(self._recipient)
+        fee = self._fee
+        if fee is None:
+            if fee_parameters is None:
+                raise ValueError("live RPC fee parameters are required when no explicit fee is set")
+            fee = calculate_transfer_fee(
+                keypair=keypair,
+                recipient=recipient,
+                amount=self._amount,
+                nonce=nonce,
+                chain_id=chain_id,
+                parameters=fee_parameters,
+                gas_limit=self._gas_limit,
+                memo=self._memo,
+            )
+        return Transaction.sign_transfer(
+            keypair=keypair,
+            recipient=recipient,
             amount=self._amount,
-            fee=self._fee,
+            nonce=nonce,
+            chain_id=chain_id,
+            fee=fee,
             gas_limit=self._gas_limit,
             memo=self._memo,
-            signature=signature,
         )
 
 

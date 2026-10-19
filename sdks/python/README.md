@@ -1,18 +1,22 @@
 # Aether Python SDK
 
-Synchronous JSON-RPC helpers, transfer payload builders, and AI job request builders
-for Arrha / Aether. The package uses Python's standard library and requires Python
-3.9+ according to `pyproject.toml`.
+Synchronous JSON-RPC helpers, Ed25519-signed transfer support, and AI job request
+builders for Arrha / Aether. The package requires Python 3.9+ and PyCA
+`cryptography` for Ed25519 signing.
 
 ## Install from this repository
 
 From the repository root:
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python3 -m pip install -e sdks/python
+python3 -m venv work/python-sdk-venv
+work/python-sdk-venv/bin/python -m pip install --upgrade pip setuptools wheel
+work/python-sdk-venv/bin/python -m pip install ./sdks/python
+work/python-sdk-venv/bin/python -c 'import aether_sdk; print(aether_sdk.__file__)'
 ```
+
+The isolated environment matters on systems that ship older pip/setuptools; the
+regular install above builds and installs the package wheel.
 
 No hosted endpoint, signing key, or node process is bundled. Start a local validator
 network using the [root guide](../../GETTING_STARTED.md).
@@ -34,37 +38,43 @@ Reads are synchronous HTTP requests with a 10-second timeout. RPC failures raise
 `ValueError`; connection failures raise `ConnectionError`. A slot number is not a
 transaction finality check.
 
-## Payload-building example
+`client.request_airdrop(address, amount)` returns an `AirdropResponse` acknowledgement,
+not a transaction hash. The local faucet directly seeds state only when the
+single-validator node enables it; multi-validator devnets disable this method.
+Use the CLI transfer path to fund an account on the four-validator devnet.
+
+## Signed local/devnet transfer
 
 ```python
-from aether_sdk import AetherClient
+from aether_sdk import AetherClient, Keypair
 
 client = AetherClient("http://127.0.0.1:8545")
+keypair = Keypair.generate()  # fund this address on the local devnet first
+chain_id = client.get_chain_id()
+pending = client.get_pending_account(keypair.address_hex)
+nonce = 0 if pending is None else int(pending["nonce"])
+fees = client.get_fee_parameters()
+
 tx = (
     client.transfer()
     .to("0x" + "8b" * 20)
     .amount(1_000_000)
     .memo("example")
-    .build(
-        sender="0x" + "11" * 20,
-        sender_public_key="0x" + "a1" * 32,
-        signature="0x" + "b2" * 64,
-        nonce=7,
-    )
+    .build(keypair=keypair, chain_id=chain_id, nonce=nonce, fee_parameters=fees)
 )
 
-print(tx.to_rpc_transaction())  # structural example; these are placeholder credentials
+submitted = client.submit(tx)  # raw bincode transaction; returned hash is checked
+receipt = client.wait_for_finality(submitted.tx_hash)
+print(receipt)
 ```
 
-This example only constructs a payload: `TransferBuilder` takes a caller-supplied
-public key and 64-byte signature and does not sign. `Transaction.hash()` computes a
-Python JSON hash, so do not assume it is the node's signed transaction identifier.
-`client.submit(tx)` calls `aeth_sendTransaction`; acceptance is distinct from
-finalization. The placeholder example above must not be submitted as a valid transfer.
-
-Use the [CLI/Rust chain journey](../../README.md#accounts-transfers-and-a-wasm-contract)
-for the repository's signed transfer/deploy/call path. Python submission is not covered
-by the retained process E2E journey.
+The SDK uses the node's live chain ID, pending nonce, and fee parameters; it signs the
+same canonical bincode hash as Rust and submits the full transaction through
+`aeth_sendRawTransaction`. The example is for local/devnet use. Fund the generated
+address before submitting. The retained cross-validator journey is
+`python3 scripts/client-e2e.py`; it funds a temporary wallet with the local CLI,
+submits through this SDK, waits for a successful finalized receipt, and checks the
+recipient balance through a second validator.
 
 ## Job request builders
 

@@ -62,7 +62,7 @@ pub struct Block {
 }
 
 /// Current protocol version. Incremented on hard forks.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BlockHeader {
@@ -96,8 +96,22 @@ pub struct AggregatedVote {
 impl Block {
     pub fn hash(&self) -> H256 {
         use sha2::{Digest, Sha256};
-        let bytes = bincode::serialize(&self.header).expect("header serialization infallible");
-        let hash = Sha256::digest(&bytes);
+        // Evidence changes branch-local staking state, so it must be part of
+        // the certified block identity. Keep the QC out of the hash: QCs
+        // certify a block and are attached after its ID is established.
+        // The domain tag makes this commitment distinct from the v1
+        // header-only block ID and from other serialized protocol objects.
+        const DOMAIN: &[u8] = b"AETHER_BLOCK_V2\0";
+        let header = bincode::serialize(&self.header).expect("header serialization infallible");
+        let evidence = bincode::serialize(&self.slash_evidence)
+            .expect("slash evidence serialization infallible");
+        let mut hasher = Sha256::new();
+        hasher.update(DOMAIN);
+        hasher.update((header.len() as u64).to_le_bytes());
+        hasher.update(header);
+        hasher.update((evidence.len() as u64).to_le_bytes());
+        hasher.update(evidence);
+        let hash = hasher.finalize();
         H256::from_slice(&hash).expect("SHA256 produces 32 bytes")
     }
 

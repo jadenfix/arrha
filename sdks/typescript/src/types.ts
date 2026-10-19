@@ -1,13 +1,11 @@
 export interface ClientConfig {
-  defaultFee: bigint;
   defaultGasLimit: number;
   /** Milliseconds before a request times out. Defaults to 30 000 ms. */
   requestTimeoutMs: number;
 }
 
 export const DEFAULT_CONFIG: ClientConfig = {
-  defaultFee: 2_000_000n,
-  defaultGasLimit: 500_000,
+  defaultGasLimit: 21_000,
   requestTimeoutMs: 30_000,
 };
 
@@ -15,18 +13,6 @@ export interface TransferRequestPayload {
   recipient: string;
   amount: bigint;
   memo?: string;
-}
-
-export interface TransactionFields {
-  nonce: number;
-  sender: string;
-  senderPublicKey: string;
-  recipient: string;
-  amount: bigint;
-  fee: bigint;
-  gasLimit: number;
-  memo?: string;
-  signature: string;
 }
 
 export interface JobRequest {
@@ -48,6 +34,18 @@ export interface JobSubmission {
 export interface SubmitResponse {
   txHash: string;
   accepted: boolean;
+}
+
+export interface AirdropResponse {
+  success: true;
+}
+
+export interface RpcFeeParameters {
+  a: string;
+  b: string;
+  c: string;
+  minBaseFee: string;
+  chainId: number;
 }
 
 export interface RpcBlock {

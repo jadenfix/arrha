@@ -1,5 +1,14 @@
 export { AetherClient } from "./client.js";
-export { Transaction } from "./transaction.js";
+export {
+  Transaction,
+  bytesToHex0x,
+  calculateTransferFee,
+  devnetSeed,
+  hexToBytesStrict,
+  keypairFromSeed,
+  randomSeed,
+} from "./transaction.js";
+export type { FeeParameters, Keypair, TransferOptions } from "./transaction.js";
 export { TransferBuilder, JobBuilder } from "./builders.js";
 export { AetherSubscription } from "./subscriptions.js";
 export {
@@ -28,6 +37,7 @@ export {
   verifyPaymentEnvelopeSignature,
 } from "./agent-payment.js";
 export type {
+  AirdropResponse,
   ClientConfig,
   JobRequest,
   JobSubmission,
@@ -36,7 +46,6 @@ export type {
   RpcAccountState,
   RpcBlock,
   RpcReceipt,
-  TransactionFields,
   TransferRequestPayload,
 } from "./types.js";
 export type {

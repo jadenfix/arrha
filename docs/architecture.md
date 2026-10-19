@@ -1,7 +1,8 @@
 # Arrha / Aether architecture
 
-Source audit: **2026-10-18**, against the implementation baseline
-`b5460e8` on `main` (merged cleanup PR #413).
+Source audit: **2026-10-19**, including the protocol-v2 and delivery repairs
+after the cleanup in PR #413 and documentation audit in PR #414. The diagram
+traces the executable assembly below; it is not a production qualification.
 Arrha is the repository name; Rust packages, binaries, and protocol names still use Aether.
 The baseline removes the print-only AI runtime, unused feature-gate registry,
 alternative consensus engines, and obsolete test/phase assets. This is a source
@@ -14,7 +15,7 @@ Separate library components are listed below the diagram, with their integration
 
 ```mermaid
 flowchart LR
-    Clients["aetherctl / Rust chain SDK"] --> RPC["JSON-RPC / health<br/>WebSocket surface"]
+    Clients["aetherctl / Rust, TypeScript, Python SDKs<br/>Explorer / Wallet"] --> RPC["JSON-RPC / health<br/>WebSocket surface"]
     RPC <--> Core
     subgraph Node["aether-node"]
         Core["Node coordinator<br/>Mempool + slot loop<br/>VRF / BLS / 2-chain consensus"]
@@ -25,6 +26,7 @@ flowchart LR
     end
     Core <--> P2P["libp2p TCP<br/>Noise / Yamux / gossipsub"]
     P2P <--> Peers["Other validators"]
+    RPC -->|finalized block polling| Indexer["aether-indexer<br/>RPC client + RocksDB"]
 ```
 
 ## Transaction and finality path
@@ -55,10 +57,17 @@ flowchart LR
    `commit_finalized` commit the finalized branch through `Ledger::commit_pending`,
    combining state changes, block/receipt data, metadata, and staking persistence
    in an atomic RocksDB batch. Pending branches are not written as finalized state.
-6. Epoch transitions are a separate slot-loop path: reward/unbonding credits and
-   staking state use their own atomic storage batch outside block execution.
-   Atomic block finalization alone is not proof that epoch scheduling is safe
-   under partitions or restart.
+6. Protocol v2 keeps the genesis consensus committee fixed. Economic slashes
+   update stake, but do not reconfigure consensus membership; finalized on-chain
+   committee reconfiguration is not implemented. Rewards for crossed epochs,
+   completed unbondings, slashing effects, transaction execution, and fee
+   distribution are computed on the candidate's parent branch. Credits are
+   applied before fees, and the header state root plus receipt state roots are
+   captured after all block effects. The overlay is adopted only when finalized.
+   Epoch randomness still advances in the slot loop; it does not directly
+   mutate account balances there.
+   V2 block IDs bind the header and slash evidence with a domain-separated
+   hash; a certificate cannot be reused after evidence is changed.
 7. JSON-RPC exposes finalized and pending views, transaction status, blocks,
    accounts, and contract storage. Callers must distinguish included from finalized.
 
@@ -78,12 +87,16 @@ flowchart LR
 ## Interfaces and observability
 
 - The binary starts JSON-RPC, P2P, slot processing, and a Prometheus exporter.
-- JSON-RPC defaults to loopback port 8545, with `/health`, POST JSON-RPC,
-  and `/ws`; P2P listens on TCP port 9000; metrics default to port 9090.
+- JSON-RPC defaults to loopback port 8545, with process liveness at `/health`,
+  finality readiness at `/ready`, POST JSON-RPC, and `/ws`; container/operator
+  deployments opt into a non-loopback bind with `AETHER_RPC_BIND_IP`. P2P
+  listens on TCP port 9000; metrics default to port 9090.
 - The four-process devnet overrides these to RPC 8545–8548, P2P 9000–9003,
   and metrics 9100–9103; see [`scripts/devnet.sh`](../scripts/devnet.sh).
-- CLI, SDKs, explorer, and wallet live in separate packages. Their presence does
-  not imply every client method or screen has been verified against a running node.
+- CLI, Rust/TypeScript/Python SDKs, explorer, and wallet connect directly to
+  node JSON-RPC. The optional four-process devnet client journey exercises
+  signed transfers through the TypeScript and Python SDKs across validators;
+  it does not exercise every method or verify every explorer and wallet screen.
 
 ## Components outside the assembled node path
 
@@ -92,7 +105,7 @@ flowchart LR
 | Parallel scheduler (`crates/runtime`) | Library exists; node ledger block execution is sequential. |
 | QUIC, Turbine, erasure coding (`crates/networking`, `crates/da`) | Separate libraries; the binary uses `aether-p2p` over TCP and broadcasts whole blocks. Shred events are recognized but the node decoder returns no node message for them; there is no reassembly integration in this path. |
 | gRPC firehose (`crates/rpc/grpc-firehose`) | `FirehoseServer` currently wraps an in-process Tokio broadcast channel. The node does not start a gRPC firehose listener. |
-| Indexer (`crates/tools/indexer`) | Query/store/ingestion code exists, but its executable creates its own local firehose rather than connecting to a node. Do not draw a live finalized-block feed to it. |
+| Indexer (`crates/tools/indexer`) | Separate executable polls a configured node's JSON-RPC finalized slot and full blocks, writes them to RocksDB, verifies chain identity and the persisted block checkpoint on reconnect, and serves `/status` plus `/block/{slot}`. The node binary and validator Compose graph do not start it. |
 | AI mesh and TEE/VCR/KZG verifiers | Separate service/library code. The TEE verifier rejects non-simulation reports because certificate-chain verification is unimplemented. The print-only AI runtime executable was removed; no end-to-end attested inference/settlement service is assembled. |
 | Native program crates | Staking logic is used by the node. Other program libraries must not be represented as a universal node dispatch path: ledger contract dispatch explicitly handles deploy/call IDs, with transfer and UTxO handling alongside it. |
 | Agent settlement / sibling projects | The [ecosystem design](ecosystem/aether-agent-settlement.md) describes intended compatibility and gaps. Verify matching producer and consumer implementations before treating a bridge as active. |
@@ -109,17 +122,20 @@ settlement require integration beyond those maps.
 - **Local multi-process devnet:** `scripts/devnet.sh` builds and launches four
   validators with a common genesis and real libp2p connections.
 - **Compose assets:** `docker-compose.test.yml` and
-  `deploy/docker/docker-compose.yml` describe test/development environments.
-  Asset presence alone does not prove successful startup or service integration.
+  `deploy/docker/docker-compose.yml` use one shared-genesis four-validator
+  container journey and a real RPC transfer runner. They do not run the
+  standalone indexer or establish an operator deployment.
 - **Infrastructure scaffolding:** `deploy/helm`, `deploy/k8s`, and
   `deploy/terraform` are deployment assets, not evidence of a deployed network.
 
 The current [CI definition](../.github/workflows/ci.yml) includes formatting,
-Clippy, a dependency audit (allowed to fail), in-process E2E, TypeScript workspace builds, Linux release builds, a Docker image build, scoped in-process node
-integration tests, and a four-process devnet E2E job. The devnet script checks
-finality, transfers, WASM contracts, validator loss, and restart/catch-up.
-The integration job no longer brings up Compose; obsolete phase acceptance scripts have been removed. The workflow uploads devnet logs on failure; it does not publish release
-artifacts or deploy a network.
+Clippy, dependency auditing that fails on unexcepted vulnerabilities, unsound
+advisories, and yanked crates while leaving unmaintained advisories visible,
+in-process E2E, TypeScript workspace and app builds, Linux release builds, a real
+Compose container journey, and a four-process devnet journey with TypeScript and
+Python client transfers plus an indexer restart check.
+These are configured checks, not evidence that they passed on a particular
+revision. The workflow does not publish release artifacts or deploy a network.
 See [testing](testing.md) for the E2E-only suite and its evidence limits.
 
 The README's benchmark results are explicitly a four-process, single-machine

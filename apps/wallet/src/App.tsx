@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 
-import { AetherClient } from "@aether/sdk";
+import { AetherClient, bytesToHex0x, hexToBytesStrict, keypairFromSeed, randomSeed } from "@aether/sdk";
+import type { Keypair } from "@aether/sdk";
 import { Card, Metric, Section } from "@aether/ui";
 
 const RPC_ENDPOINT =
@@ -8,170 +9,249 @@ const RPC_ENDPOINT =
   "http://127.0.0.1:8545";
 const client = new AetherClient(RPC_ENDPOINT);
 
-interface TransferPreview {
-  txHash: string;
-  sender: string;
-  recipient: string;
-  amount: string;
-  fee: string;
-  slot: number | null;
-  mode: "live" | "offline";
-}
-
-interface JobPreview {
-  url: string;
-  method: string;
-  jobId: string;
-  modelHash: string;
-  preparedMatches: boolean;
-}
-
-const DEMO_SENDER = "0x1111111111111111111111111111111111111111";
-const DEMO_PUBLIC_KEY = "0x" + "aa".repeat(32);
-const DEMO_SIGNATURE = "0x" + "bb".repeat(64);
-const DEMO_RECIPIENT = "0x8b0b54d2248a3a5617b6bd8a2fd4cc8ebc0f2e90";
-
 export function App() {
-  const [transferPreview, setTransferPreview] = useState<TransferPreview | null>(null);
-  const [networkStatus, setNetworkStatus] = useState("Connecting to local RPC...");
+  const [keypair, setKeypair] = useState<Keypair | null>(null);
+  const [seedInput, setSeedInput] = useState("");
+  const [recipient, setRecipient] = useState("");
+  const [amount, setAmount] = useState("1000");
+  const [memo, setMemo] = useState("");
+  const [networkStatus, setNetworkStatus] = useState("Checking RPC…");
+  const [currentSlot, setCurrentSlot] = useState<number | null>(null);
+  const [balance, setBalance] = useState<string | null>(null);
+  const [txHash, setTxHash] = useState<string | null>(null);
+  const [txStatus, setTxStatus] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const sender = keypair ? bytesToHex0x(keypair.address) : null;
 
   useEffect(() => {
     let cancelled = false;
+    void client.getSlotNumber()
+      .then((slot) => {
+        if (cancelled) return;
+        setCurrentSlot(slot);
+        setNetworkStatus("Connected to local/devnet RPC");
+      })
+      .catch((reason: unknown) => {
+        if (cancelled) return;
+        setNetworkStatus("RPC unavailable");
+        setError(reason instanceof Error ? reason.message : String(reason));
+      });
+    return () => { cancelled = true; };
+  }, []);
 
-    async function loadTransferPreview() {
-      const tx = client
-        .transfer()
-        .to(DEMO_RECIPIENT)
-        .amount(750_000n)
-        .memo("wallet demo")
-        .fee(2_750_000n)
-        .gasLimit(650_000)
-        .build({
-          sender: DEMO_SENDER,
-          senderPublicKey: DEMO_PUBLIC_KEY,
-          signature: DEMO_SIGNATURE,
-          nonce: 7,
-        });
+  async function installSeed(seed: Uint8Array) {
+    const generated = await keypairFromSeed(seed);
+    setKeypair(generated);
+    setSeedInput(bytesToHex0x(generated.secretKey));
+    setTxHash(null);
+    setTxStatus(null);
+    setError(null);
+    await refreshBalance(generated.address);
+  }
 
-      try {
-        const slot = await client.getSlotNumber();
-        if (cancelled) {
-          return;
-        }
-        setNetworkStatus("Live JSON-RPC (preview mode)");
-        setTransferPreview({
-          txHash: tx.hash(),
-          sender: DEMO_SENDER,
-          recipient: DEMO_RECIPIENT,
-          amount: "750,000 AIC",
-          fee: "2,750,000 lamports",
-          slot,
-          mode: "live",
-        });
-      } catch {
-        if (cancelled) {
-          return;
-        }
-        setNetworkStatus("RPC unavailable (showing offline preview)");
-        setTransferPreview({
-          txHash: tx.hash(),
-          sender: DEMO_SENDER,
-          recipient: DEMO_RECIPIENT,
-          amount: "750,000 AIC",
-          fee: "2,750,000 lamports",
-          slot: null,
-          mode: "offline",
-        });
-      }
+  async function refreshBalance(addressBytes: Uint8Array) {
+    const account = await client.getAccount(bytesToHex0x(addressBytes));
+    setBalance(readBalance(account));
+  }
+
+  async function createSessionKey() {
+    setBusy(true);
+    setError(null);
+    try {
+      await installSeed(randomSeed());
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
     }
+  }
 
-    loadTransferPreview();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  async function importSessionKey() {
+    setBusy(true);
+    setError(null);
+    try {
+      await installSeed(hexToBytesStrict(seedInput, 32));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
 
-  const jobPreview = useMemo<JobPreview>(() => {
-    const submission = client
-      .job()
-      .id("wallet-hello-job")
-      .model("0x" + "12".repeat(32))
-      .input("0x" + "ab".repeat(32))
-      .maxFee(600_000_000)
-      .expiresAt(new Date(Date.now() + 3_600_000))
-      .toSubmission();
+  async function requestDevnetFunds() {
+    if (!sender || !keypair) return;
+    setBusy(true);
+    setError(null);
+    setTxHash(null);
+    setTxStatus("Requesting local faucet credit…");
+    try {
+      const acknowledgement = await client.requestAirdrop(sender, 1_000_000_000n);
+      if (!acknowledgement.success) throw new Error("local faucet did not acknowledge the credit");
+      await refreshBalance(keypair.address);
+      setTxStatus("Local faucet credit applied; this was not a transaction");
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      if (message.toLowerCase().includes("airdrop is disabled")) {
+        setTxStatus(null);
+        setError(`${message}. Fund this address on a multi-validator devnet with: ./target/release/aetherctl chain --rpc ${RPC_ENDPOINT} transfer --dev 0 --to ${sender} --amount 1000000000 --wait`);
+      } else {
+        setTxStatus(null);
+        setError(message);
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
 
-    const prepared = client.prepareJobSubmission(submission.body);
-    return {
-      url: prepared.url,
-      method: prepared.method,
-      jobId: prepared.body.jobId,
-      modelHash: prepared.body.modelHash,
-      preparedMatches: prepared.body.jobId === "wallet-hello-job"
-    };
-  }, []);
+  async function sendTransfer(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!keypair || !recipient.trim()) return;
+    setBusy(true);
+    setError(null);
+    setTxHash(null);
+    setTxStatus("Preparing and signing locally…");
+    try {
+      const [chainId, account, feeParameters] = await Promise.all([
+        client.getChainId(),
+        client.getPendingAccount(sender!),
+        client.getFeeParameters(),
+      ]);
+      const nonce = readNonce(account);
+      const transaction = await client
+        .transfer()
+        .to(recipient.trim())
+        .amount(parseAmount(amount))
+        .memo(memo)
+        .build({ keypair, chainId, nonce, feeParameters });
+      setTxHash(transaction.hash);
+      setTxStatus("Signed locally; submitting");
+      const submitted = await client.submit(transaction);
+      setTxStatus("Submitted; waiting for finality");
+      await client.waitForFinality(submitted.txHash);
+      setTxStatus("Finalized");
+      const slot = await client.getSlotNumber();
+      setCurrentSlot(slot);
+      await refreshBalance(keypair.address);
+    } catch (reason) {
+      setTxStatus(null);
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const shortSender = sender ? `${sender.slice(0, 10)}…${sender.slice(-6)}` : "No key loaded";
 
   return (
-    <div style={{
-      display: "grid",
-      gap: "24px",
-      padding: "24px",
-      background: "#050b12",
-      minHeight: "100vh",
-      fontFamily: "Inter, system-ui, -apple-system, BlinkMacSystemFont"
-    }}>
-      <Card title="Wallet Overview" subtitle="Transaction payload preview">
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: "12px" }}>
-          <Metric label="Default Endpoint" value={client.getEndpoint()} />
-          <Metric label="Network Mode" value={networkStatus} />
-          <Metric
-            label="Demo Sender"
-            value={`${(transferPreview?.sender ?? DEMO_SENDER).slice(0, 10)}…`}
-          />
-          <Metric
-            label="Transfer Hash"
-            value={transferPreview ? transferPreview.txHash.slice(0, 12) + "…" : "pending"}
-          />
-          <Metric
-            label="Current Slot"
-            value={transferPreview?.slot != null ? String(transferPreview.slot) : "n/a"}
-          />
+    <main style={pageStyle}>
+      <Card title="Aether Wallet" subtitle="Local/devnet transfer signing">
+        <p style={warningStyle}>
+          Local/devnet use only. This demo keeps the seed in this tab’s memory and does not encrypt or persist it.
+          Never enter a mainnet key or use this wallet for real funds.
+        </p>
+        <div style={metricGridStyle}>
+          <Metric label="RPC Endpoint" value={client.getEndpoint()} />
+          <Metric label="Network" value={networkStatus} />
+          <Metric label="Current Slot" value={currentSlot == null ? "—" : String(currentSlot)} />
+          <Metric label="Session Account" value={shortSender} />
+          <Metric label="Balance" value={balance ?? "—"} />
         </div>
       </Card>
 
-      <Card title="Transfer Preview" subtitle="Offline payload">
-        <Section title="Details">
-          <dl style={{ display: "grid", gap: "4px", gridTemplateColumns: "auto 1fr", color: "#e5ecff" }}>
-            <dt>Recipient</dt>
-            <dd style={{ margin: 0 }}>{transferPreview?.recipient ?? DEMO_RECIPIENT}</dd>
-            <dt>Amount</dt>
-            <dd style={{ margin: 0 }}>{transferPreview?.amount ?? "750,000 AIC"}</dd>
-            <dt>Fee</dt>
-            <dd style={{ margin: 0 }}>{transferPreview?.fee ?? "2,750,000 lamports"}</dd>
-            <dt>Submit Path</dt>
-            <dd style={{ margin: 0 }}>
-              {transferPreview?.mode === "live" ? "manual submit only" : "local fallback"}
-            </dd>
-          </dl>
+      <Card title="Session Key" subtitle="Generated locally in this browser tab">
+        <Section title="Key material">
+          <label style={labelStyle} htmlFor="seed">Ed25519 seed (32-byte hex)</label>
+          <input
+            id="seed"
+            type="password"
+            autoComplete="off"
+            value={seedInput}
+            onChange={(event) => setSeedInput(event.target.value)}
+            style={inputStyle}
+          />
+          <div style={buttonRowStyle}>
+            <button type="button" disabled={busy} onClick={() => void createSessionKey()} style={buttonStyle}>
+              Generate random session key
+            </button>
+            <button type="button" disabled={busy || !seedInput.trim()} onClick={() => void importSessionKey()} style={buttonStyle}>
+              Load seed
+            </button>
+            <button type="button" disabled={busy || !sender} onClick={() => void requestDevnetFunds()} style={buttonStyle}>
+              Request local faucet credit
+            </button>
+          </div>
+          {sender && <p style={addressStyle}>Address: <code>{sender}</code></p>}
         </Section>
       </Card>
 
-      <Card title="Job Submission" subtitle="Hello AIC tutorial">
-        <Section title="Coordinator Request">
-          <dl style={{ display: "grid", gap: "4px", gridTemplateColumns: "auto 1fr", color: "#e5ecff" }}>
-            <dt>Endpoint</dt>
-            <dd style={{ margin: 0 }}>{jobPreview.url}</dd>
-            <dt>Method</dt>
-            <dd style={{ margin: 0 }}>{jobPreview.method}</dd>
-            <dt>Job ID</dt>
-            <dd style={{ margin: 0 }}>{jobPreview.jobId}</dd>
-            <dt>Model</dt>
-            <dd style={{ margin: 0 }}>{jobPreview.modelHash.slice(0, 18) + "…"}</dd>
-            <dt>Prepared Matches</dt>
-            <dd style={{ margin: 0 }}>{jobPreview.preparedMatches ? "yes" : "no"}</dd>
-          </dl>
-        </Section>
+      <Card title="Send transfer" subtitle="Builds the Rust-compatible transaction, signs its canonical hash, then submits raw bytes">
+        <form onSubmit={(event) => void sendTransfer(event)}>
+          <div style={formGridStyle}>
+            <label style={fieldStyle}>
+              Recipient address
+              <input required value={recipient} onChange={(event) => setRecipient(event.target.value)} style={inputStyle} placeholder="0x…" />
+            </label>
+            <label style={fieldStyle}>
+              Amount (base units)
+              <input required inputMode="numeric" value={amount} onChange={(event) => setAmount(event.target.value)} style={inputStyle} />
+            </label>
+            <label style={fieldStyle}>
+              Memo (optional)
+              <input value={memo} onChange={(event) => setMemo(event.target.value)} style={inputStyle} />
+            </label>
+          </div>
+          <div style={buttonRowStyle}>
+            <button type="submit" disabled={busy || !keypair || !recipient.trim()} style={buttonStyle}>
+              {busy ? "Working…" : "Sign and send"}
+            </button>
+            {txHash && <code>Transaction: {txHash}</code>}
+            {txStatus && <span role="status">{txStatus}</span>}
+          </div>
+        </form>
+        {error && <p role="alert" style={{ color: "#ffb4ab" }}>{error}</p>}
       </Card>
-    </div>
+    </main>
   );
 }
+
+function parseAmount(value: string): bigint {
+  if (!/^[1-9][0-9]*$/.test(value)) throw new Error("amount must be a positive base-10 integer");
+  return BigInt(value);
+}
+
+function readBalance(account: Record<string, unknown> | null): string | null {
+  const value = account?.balance;
+  if (typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value)) return `${value} base units`;
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return `${value} base units`;
+  if (typeof value === "number") return "Unavailable (RPC balance exceeds JavaScript safe integer range)";
+  return null;
+}
+
+function readNonce(account: Record<string, unknown> | null): bigint {
+  const value = account?.nonce;
+  if (typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value)) return BigInt(value);
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
+  if (value === undefined || value === null) return 0n;
+  throw new Error("pending account returned an invalid nonce");
+}
+
+const pageStyle: React.CSSProperties = {
+  display: "grid",
+  gap: "24px",
+  padding: "24px",
+  background: "#050b12",
+  color: "#e5ecff",
+  minHeight: "100vh",
+  fontFamily: "Inter, system-ui, -apple-system, BlinkMacSystemFont",
+};
+const metricGridStyle: React.CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "12px" };
+const formGridStyle: React.CSSProperties = { display: "grid", gap: "14px", maxWidth: "720px" };
+const fieldStyle: React.CSSProperties = { display: "grid", gap: "6px", color: "#bfcce8" };
+const labelStyle: React.CSSProperties = { display: "block", marginBottom: "6px", color: "#bfcce8" };
+const inputStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", padding: "10px 12px", color: "#e5ecff", background: "#0c1724", border: "1px solid #26384d", borderRadius: "6px" };
+const buttonRowStyle: React.CSSProperties = { display: "flex", flexWrap: "wrap", alignItems: "center", gap: "10px", marginTop: "14px" };
+const buttonStyle: React.CSSProperties = { padding: "10px 14px", color: "#e5ecff", background: "#173354", border: "1px solid #426a93", borderRadius: "6px", cursor: "pointer" };
+const warningStyle: React.CSSProperties = { color: "#f4d58d", marginTop: 0, lineHeight: 1.5 };
+const addressStyle: React.CSSProperties = { overflowWrap: "anywhere", color: "#bfcce8" };

@@ -5,7 +5,7 @@ scripts. The workspace package metadata declares Rust 1.86; CI installs stable.
 Native RocksDB bindings need a C/C++ toolchain and libclang. On macOS, install the
 Xcode Command Line Tools (`xcode-select --install`) and make libclang available;
 on Debian/Ubuntu, the Docker build uses `pkg-config clang llvm-dev libclang-dev`.
-Node.js 20+ and npm are needed for the web workspace build. Docker is optional.
+Node.js 20+ and npm are needed for the TypeScript SDK and browser apps. Docker is optional.
 
 Run the commands below from the repository root. Arrha is the repository name;
 packages and executable names retain the Aether name.
@@ -78,8 +78,71 @@ cargo run -p aether-cli --bin aetherctl -- chain info
 ```
 
 Use the README's transfer/deploy/call examples for the supported signed chain
-journey. The Rust SDK has matching chain helpers. TypeScript/Python job helpers
+journey. Rust SDK online submission validates against the node's live fee parameters;
+use `chain::*_with_fee_parameters` or `TransferBuilder::build_with_fee_parameters`
+for custom chains. The original synchronous `chain::transfer_tx`, `deploy_tx`,
+`call_tx`, and `finalize_tx` helpers retain devnet fee defaults; the legacy
+`TransferBuilder::build` uses its configured default fee and devnet fee validation.
+Online `AetherClient::submit` fetches live parameters and rejects a fee or chain-ID
+mismatch without changing the signed transaction. TypeScript/Python job helpers
 and UI previews do not establish a deployed AI settlement service.
+
+### TypeScript SDK and browser apps
+
+From the repository root, install dependencies and build the SDK and both apps:
+
+```bash
+npm ci
+npm run build:web
+```
+
+Start either app with a validator reachable at `http://127.0.0.1:8545`:
+
+```bash
+npm run dev:explorer  # http://127.0.0.1:3000
+npm run dev:wallet    # in another terminal, http://127.0.0.1:3001
+```
+
+Override the RPC endpoint by setting `VITE_AETHER_RPC_ENDPOINT` in the app
+workspace environment before starting Vite. Both apps make browser JSON-RPC
+requests, so the node must allow the corresponding local page origins. If RPC
+cannot be reached, the explorer labels the live values unavailable and the wallet
+shows an RPC error; unavailable is not a zero measurement. The wallet generates
+or imports an Ed25519 seed in the current tab, signs transfers locally, and can
+request a local faucet credit when the single-validator node enables it. That
+credit is an immediate local state seed, not a transaction; faucet requests are
+disabled on multi-validator devnets. Use the wallet's displayed CLI command to
+fund its address on a multi-validator devnet. The seed is neither encrypted nor
+persisted; use only with a local/devnet node and never enter a mainnet key.
+
+### Python SDK and live SDK journeys
+
+The Python wheel can be installed from the repository in an isolated environment:
+
+```bash
+python3 -m venv work/python-sdk-venv
+work/python-sdk-venv/bin/python -m pip install --upgrade pip setuptools wheel
+work/python-sdk-venv/bin/python -m pip install ./sdks/python
+work/python-sdk-venv/bin/python -c 'import aether_sdk; print(aether_sdk.__file__)'
+```
+
+With the four-validator devnet running and `target/release/aetherctl` built, each
+retained client journey funds a temporary key through the Rust CLI, submits the
+SDK's canonical signed binary transaction to validator 1, waits for a successful
+finalized receipt, and verifies the precise recipient balance delta through
+validator 3:
+
+```bash
+npm run e2e:client
+work/python-sdk-venv/bin/python scripts/client-e2e.py
+```
+
+The journeys default to RPC ports 8545 and 8547; use `AETHER_RPC_FROM`,
+`AETHER_RPC_READ`, and `AETHERCTL_BIN` to select other endpoints or the CLI path.
+They require funded devnet support and do not run against a hosted production
+network. An offline SDK build or matching TS/Python serialization alone is not
+Rust acceptance evidence. The scripts only report `PASS` after Rust accepts the
+raw transaction and the second validator confirms finalized state.
 
 ## Node configuration
 

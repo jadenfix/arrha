@@ -50,15 +50,45 @@ impl ValidatorKeypair {
         };
         let json = serde_json::to_string_pretty(&keyfile)?;
 
-        // Write with restrictive permissions (owner-only read/write)
-        std::fs::write(path, json)
-            .with_context(|| format!("failed to write key file: {}", path.display()))?;
-
+        // Create the temporary file with owner-only permissions from its first
+        // byte, then atomically replace the key file after syncing its contents.
+        use std::io::Write;
+        let file_name = path
+            .file_name()
+            .context("validator key path has no filename")?;
+        let temporary = path.with_file_name(format!(
+            ".{}.{}.tmp",
+            file_name.to_string_lossy(),
+            std::process::id()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
+        let mut file = options
+            .open(&temporary)
+            .with_context(|| format!("creating private key file: {}", temporary.display()))?;
+        let result = (|| -> Result<()> {
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, path)?;
+            #[cfg(unix)]
+            {
+                let directory = path
+                    .parent()
+                    .filter(|path| !path.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+                std::fs::File::open(directory)?.sync_all()?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result.with_context(|| format!("persisting key file: {}", path.display()))?;
 
         Ok(())
     }

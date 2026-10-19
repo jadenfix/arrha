@@ -79,6 +79,63 @@ const RATE_LIMIT_REFILL_INTERVAL: Duration = Duration::from_secs(1);
 const RATE_LIMIT_PENALTY: i32 = -20;
 const MAX_RATE_LIMITERS: usize = 1024;
 
+async fn resolve_dns_multiaddr(addr: &Multiaddr, original: &str) -> Result<Option<Multiaddr>> {
+    let dns_target = {
+        let protocols: Vec<_> = addr.iter().collect();
+        if protocols
+            .iter()
+            .any(|protocol| matches!(protocol, libp2p::multiaddr::Protocol::Dnsaddr(_)))
+        {
+            anyhow::bail!("dnsaddr bootstrap peers are unsupported: {original}");
+        }
+
+        let dns_host = match protocols.first() {
+            Some(libp2p::multiaddr::Protocol::Dns4(host)) => Some(((*host).clone(), true)),
+            Some(libp2p::multiaddr::Protocol::Dns6(host)) => Some(((*host).clone(), false)),
+            _ => None,
+        };
+        dns_host
+            .map(|(host, require_ipv4)| {
+                let port = match protocols.get(1) {
+                    Some(libp2p::multiaddr::Protocol::Tcp(port)) => *port,
+                    _ => {
+                        anyhow::bail!("DNS bootstrap address must use /dns4|dns6/<host>/tcp/<port>: {original}")
+                    }
+                };
+                let peer_suffix = match protocols.as_slice() {
+                    [_, _, libp2p::multiaddr::Protocol::P2p(peer_id)] => {
+                        format!("/p2p/{peer_id}")
+                    }
+                    [_, _] => String::new(),
+                    _ => anyhow::bail!("unsupported DNS bootstrap address protocols: {original}"),
+                };
+                Ok::<_, anyhow::Error>((host, require_ipv4, port, peer_suffix))
+            })
+            .transpose()?
+    };
+
+    let Some((host, require_ipv4, port, peer_suffix)) = dns_target else {
+        return Ok(None);
+    };
+    let mut lookup = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::net::lookup_host((&host[..], port)),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("DNS lookup timed out for {host}"))??;
+    let resolved = lookup
+        .find(|address| address.is_ipv4() == require_ipv4)
+        .ok_or_else(|| anyhow::anyhow!("DNS lookup returned no compatible addresses for {host}"))?;
+    let host = match resolved.ip() {
+        std::net::IpAddr::V4(ip) => format!("/ip4/{ip}/tcp/{port}"),
+        std::net::IpAddr::V6(ip) => format!("/ip6/{ip}/tcp/{port}"),
+    };
+    let resolved_addr = format!("{host}{peer_suffix}")
+        .parse()
+        .map_err(|e| anyhow::anyhow!("failed to build resolved peer address: {e}"))?;
+    Ok(Some(resolved_addr))
+}
+
 struct PeerRateLimiter {
     tokens: u32,
     last_refill: Instant,
@@ -307,11 +364,16 @@ impl P2PNetwork {
         self.publish(TOPIC_BLOCK, data)
     }
 
-    /// Connect to a peer by multiaddr. Refuses to dial banned peers.
-    pub fn connect_peer(&mut self, addr: &str) -> Result<()> {
+    /// Connect to a peer by multiaddr. DNS4/DNS6 hosts are resolved through
+    /// the operating system with a bounded lookup before dialing. Refuses to
+    /// dial banned peers and explicitly rejects DNSADDR.
+    pub async fn connect_peer(&mut self, addr: &str) -> Result<()> {
         let multiaddr: Multiaddr = addr
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid multiaddr: {}", e))?;
+        let multiaddr = resolve_dns_multiaddr(&multiaddr, addr)
+            .await?
+            .unwrap_or(multiaddr);
 
         // Extract peer ID from multiaddr and reject if banned
         if let Some(libp2p::multiaddr::Protocol::P2p(peer_id)) = multiaddr.iter().last() {

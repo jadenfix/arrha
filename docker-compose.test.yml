@@ -1,156 +1,117 @@
+name: aether-compose-e2e
+
+x-validator: &validator
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: aether-node:compose-e2e
+  entrypoint: ["/app/scripts/docker-entrypoint.sh"]
+  depends_on:
+    genesis-init:
+      condition: service_completed_successfully
+  environment: &validator-environment
+    NUM_VALIDATORS: "4"
+    AETHER_GENESIS_DIR: /app/data/genesis
+    AETHER_GENESIS_PATH: /app/data/genesis/genesis.json
+    AETHER_RPC_BIND_IP: 0.0.0.0
+    AETHER_RPC_PORT: "8545"
+    AETHER_P2P_PORT: "9000"
+    RUST_LOG: info
+  volumes:
+    - genesis-data:/app/data/genesis:ro
+  networks:
+    - aether-testnet
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8545/health"]
+    interval: 10s
+    timeout: 3s
+    start_period: 20s
+    retries: 3
+
 services:
-  # Genesis ceremony: generates shared genesis.json + 4 validator keys
   genesis-init:
     build:
       context: .
       dockerfile: Dockerfile
-    # Named volumes are root-owned on Linux CI; run as root so genesis can write /data/genesis
-    user: "0:0"
-    entrypoint: ["genesis-ceremony"]
-    command: ["--validators", "4", "--output-dir", "/data/genesis", "--stake", "1000000", "--network", "devnet"]
+    image: aether-node:compose-e2e
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        if [ ! -s /app/data/genesis/genesis.json ]; then
+          genesis-ceremony --validators 4 --output-dir /app/data/genesis --stake 1000000 --network devnet
+        fi
     volumes:
-      - genesis-data:/data/genesis
-
-  # 4-node test network — all share the same genesis.json via a volume
-  validator-1:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    user: "0:0"
-    entrypoint: ["/app/scripts/docker-entrypoint.sh"]
-    depends_on:
-      genesis-init:
-        condition: service_completed_successfully
-    environment:
-      - VALIDATOR_ID=1
-      - NUM_VALIDATORS=4
-      - AETHER_GENESIS_DIR=/data/genesis
-      - AETHER_RPC_PORT=8545
-      - AETHER_P2P_PORT=9000
-      - AETHER_BOOTSTRAP_PEERS=
-      - RUST_LOG=info
-    ports:
-      - "8545:8545"  # JSON-RPC
-      - "9000:9000"  # P2P gossip
-    volumes:
-      - genesis-data:/data/genesis:ro
-      - validator-1-data:/data/validator-1
+      - genesis-data:/app/data/genesis
     networks:
       - aether-testnet
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8545/health"]
-      interval: 10s
-      timeout: 3s
-      start_period: 15s
-      retries: 3
+    restart: "no"
+
+  validator-1:
+    <<: *validator
+    environment:
+      <<: *validator-environment
+      VALIDATOR_ID: "1"
+      AETHER_VALIDATOR_KEY: /app/data/genesis/validator-1.key
+      AETHER_NODE_DB_PATH: /app/data/validator-1
+      AETHER_BOOTSTRAP_PEERS: ""
+    ports:
+      - "8545:8545"
+      - "9000:9000"
+    volumes:
+      - genesis-data:/app/data/genesis:ro
+      - validator-1-data:/app/data/validator-1
 
   validator-2:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    user: "0:0"
-    entrypoint: ["/app/scripts/docker-entrypoint.sh"]
-    depends_on:
-      genesis-init:
-        condition: service_completed_successfully
-      validator-1:
-        condition: service_healthy
+    <<: *validator
     environment:
-      - VALIDATOR_ID=2
-      - NUM_VALIDATORS=4
-      - AETHER_GENESIS_DIR=/data/genesis
-      - AETHER_RPC_PORT=8545
-      - AETHER_P2P_PORT=9000
-      - AETHER_BOOTSTRAP_PEERS=/ip4/validator-1/tcp/9000
-      - RUST_LOG=info
+      <<: *validator-environment
+      VALIDATOR_ID: "2"
+      AETHER_VALIDATOR_KEY: /app/data/genesis/validator-2.key
+      AETHER_NODE_DB_PATH: /app/data/validator-2
+      AETHER_BOOTSTRAP_PEERS: /dns4/validator-1/tcp/9000
     ports:
-      - "8546:8545"  # JSON-RPC
-      - "9001:9000"  # P2P gossip
+      - "8546:8545"
+      - "9001:9000"
     volumes:
-      - genesis-data:/data/genesis:ro
-      - validator-2-data:/data/validator-2
-    networks:
-      - aether-testnet
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8545/health"]
-      interval: 10s
-      timeout: 3s
-      start_period: 15s
-      retries: 3
+      - genesis-data:/app/data/genesis:ro
+      - validator-2-data:/app/data/validator-2
 
   validator-3:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    user: "0:0"
-    entrypoint: ["/app/scripts/docker-entrypoint.sh"]
-    depends_on:
-      genesis-init:
-        condition: service_completed_successfully
-      validator-1:
-        condition: service_healthy
+    <<: *validator
     environment:
-      - VALIDATOR_ID=3
-      - NUM_VALIDATORS=4
-      - AETHER_GENESIS_DIR=/data/genesis
-      - AETHER_RPC_PORT=8545
-      - AETHER_P2P_PORT=9000
-      - AETHER_BOOTSTRAP_PEERS=/ip4/validator-1/tcp/9000
-      - RUST_LOG=info
+      <<: *validator-environment
+      VALIDATOR_ID: "3"
+      AETHER_VALIDATOR_KEY: /app/data/genesis/validator-3.key
+      AETHER_NODE_DB_PATH: /app/data/validator-3
+      AETHER_BOOTSTRAP_PEERS: /dns4/validator-1/tcp/9000
     ports:
-      - "8547:8545"  # JSON-RPC
-      - "9002:9000"  # P2P gossip
+      - "8547:8545"
+      - "9002:9000"
     volumes:
-      - genesis-data:/data/genesis:ro
-      - validator-3-data:/data/validator-3
-    networks:
-      - aether-testnet
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8545/health"]
-      interval: 10s
-      timeout: 3s
-      start_period: 15s
-      retries: 3
+      - genesis-data:/app/data/genesis:ro
+      - validator-3-data:/app/data/validator-3
 
   validator-4:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    user: "0:0"
-    entrypoint: ["/app/scripts/docker-entrypoint.sh"]
-    depends_on:
-      genesis-init:
-        condition: service_completed_successfully
-      validator-1:
-        condition: service_healthy
+    <<: *validator
     environment:
-      - VALIDATOR_ID=4
-      - NUM_VALIDATORS=4
-      - AETHER_GENESIS_DIR=/data/genesis
-      - AETHER_RPC_PORT=8545
-      - AETHER_P2P_PORT=9000
-      - AETHER_BOOTSTRAP_PEERS=/ip4/validator-1/tcp/9000
-      - RUST_LOG=info
+      <<: *validator-environment
+      VALIDATOR_ID: "4"
+      AETHER_VALIDATOR_KEY: /app/data/genesis/validator-4.key
+      AETHER_NODE_DB_PATH: /app/data/validator-4
+      AETHER_BOOTSTRAP_PEERS: /dns4/validator-1/tcp/9000
     ports:
-      - "8548:8545"  # JSON-RPC
-      - "9003:9000"  # P2P gossip
+      - "8548:8545"
+      - "9003:9000"
     volumes:
-      - genesis-data:/data/genesis:ro
-      - validator-4-data:/data/validator-4
-    networks:
-      - aether-testnet
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8545/health"]
-      interval: 10s
-      timeout: 3s
-      start_period: 15s
-      retries: 3
+      - genesis-data:/app/data/genesis:ro
+      - validator-4-data:/app/data/validator-4
 
-  # Test runner
   test-runner:
     build:
       context: .
-      dockerfile: Dockerfile.test
+      dockerfile: Dockerfile
+    image: aether-node:compose-e2e
+    entrypoint: ["python3", "/app/scripts/container-e2e.py"]
     depends_on:
       validator-1:
         condition: service_healthy
@@ -160,12 +121,12 @@ services:
         condition: service_healthy
       validator-4:
         condition: service_healthy
-    environment:
-      - RPC_URL=http://validator-1:8545
     networks:
       - aether-testnet
-    command: |
-      sh -c "./cli-test --in-process-only"
+
+networks:
+  aether-testnet:
+    driver: bridge
 
 volumes:
   genesis-data:
@@ -173,7 +134,3 @@ volumes:
   validator-2-data:
   validator-3-data:
   validator-4-data:
-
-networks:
-  aether-testnet:
-    driver: bridge

@@ -1,7 +1,9 @@
 from .client import AetherClient
 from .builders import TransferBuilder, JobBuilder
 from .transaction import Transaction
+from .transaction import FeeParameters, Keypair
 from .types import (
+    AirdropResponse,
     ClientConfig,
     JobRequest,
     JobSubmission,
@@ -18,6 +20,9 @@ __all__ = [
     "TransferBuilder",
     "JobBuilder",
     "Transaction",
+    "FeeParameters",
+    "Keypair",
+    "AirdropResponse",
     "ClientConfig",
     "JobRequest",
     "JobSubmission",

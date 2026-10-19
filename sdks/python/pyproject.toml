@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Aether Labs" }]
-dependencies = []
+dependencies = ["cryptography>=41.0"]
 
 [project.optional-dependencies]
 dev = ["mypy>=1.6"]

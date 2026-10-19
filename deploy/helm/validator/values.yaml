@@ -1,9 +1,14 @@
 replicaCount: 4
 
 image:
-  repository: aether/validator
-  tag: latest
+  repository: aether-node
+  tag: operator-supplied
   pullPolicy: IfNotPresent
+
+# Create these from the same genesis ceremony before installing the chart.
+genesis:
+  configMapName: aether-genesis
+  secretName: validator-keys
 
 resources:
   requests:
@@ -22,20 +27,22 @@ ports:
   p2p: 9000
   metrics: 9090
 
+network:
+  # Must match the headless service used by the StatefulSet peer DNS names.
+  headlessServiceName: aether-validator
+
 env:
-  AETHER_RPC_PORT: "8545"
   RUST_LOG: "info"
 
 affinity:
   podAntiAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-      - labelSelector:
-          matchExpressions:
-            - key: app
-              operator: In
-              values:
-                - aether-validator
-        topologyKey: topology.kubernetes.io/zone
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app: aether-validator
+          topologyKey: kubernetes.io/hostname
 
 livenessProbe:
   httpGet:
@@ -46,7 +53,7 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /health
-    port: 8545
+    path: /ready
+    port: rpc
   initialDelaySeconds: 10
   periodSeconds: 5

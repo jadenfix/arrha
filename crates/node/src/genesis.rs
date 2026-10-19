@@ -34,7 +34,7 @@ pub struct GenesisConfig {
 }
 
 fn default_protocol_version() -> u32 {
-    1
+    aether_types::PROTOCOL_VERSION
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,7 +83,7 @@ impl GenesisConfig {
             accounts,
             timestamp: 0,
             genesis_time_ms: 0,
-            protocol_version: 1,
+            protocol_version: aether_types::PROTOCOL_VERSION,
         }
     }
 
@@ -221,7 +221,7 @@ impl GenesisConfig {
                 .unwrap_or_default()
                 .as_secs(),
             genesis_time_ms: 0,
-            protocol_version: 1,
+            protocol_version: aether_types::PROTOCOL_VERSION,
         }
     }
 
@@ -239,6 +239,14 @@ impl GenesisConfig {
     /// Validate the genesis config.
     pub fn validate(&self) -> Result<()> {
         self.chain_config.validate()?;
+
+        if self.protocol_version != aether_types::PROTOCOL_VERSION {
+            bail!(
+                "genesis protocol version {} is incompatible with node protocol {}; create a new v2 genesis",
+                self.protocol_version,
+                aether_types::PROTOCOL_VERSION
+            );
+        }
 
         if self.validators.is_empty() {
             bail!("must have at least one validator");

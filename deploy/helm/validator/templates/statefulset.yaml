@@ -5,7 +5,8 @@ metadata:
   labels:
     app: aether-validator
 spec:
-  serviceName: {{ .Release.Name }}-validator
+  podManagementPolicy: Parallel
+  serviceName: {{ .Values.network.headlessServiceName }}
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
@@ -18,12 +19,15 @@ spec:
         prometheus.io/scrape: "true"
         prometheus.io/port: "{{ .Values.ports.metrics }}"
     spec:
+      securityContext:
+        fsGroup: 1000
       affinity:
         {{- toYaml .Values.affinity | nindent 8 }}
       containers:
         - name: validator
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/app/scripts/docker-entrypoint.sh"]
           ports:
             - name: rpc
               containerPort: {{ .Values.ports.rpc }}
@@ -32,21 +36,64 @@ spec:
             - name: metrics
               containerPort: {{ .Values.ports.metrics }}
           env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NUM_VALIDATORS
+              value: {{ .Values.replicaCount | quote }}
+            - name: AETHER_HEADLESS_SERVICE
+              value: {{ .Values.network.headlessServiceName | quote }}
             {{- range $key, $val := .Values.env }}
             - name: {{ $key }}
               value: {{ $val | quote }}
             {{- end }}
+            - name: AETHER_GENESIS_DIR
+              value: /config
+            - name: AETHER_GENESIS_PATH
+              value: /config/genesis.json
+            - name: AETHER_KEY_DIR
+              value: /keys
             - name: AETHER_NODE_DB_PATH
               value: /data/aether
+            - name: AETHER_RPC_BIND_IP
+              value: 0.0.0.0
+            - name: AETHER_RPC_PORT
+              value: {{ .Values.ports.rpc | quote }}
+            - name: AETHER_P2P_PORT
+              value: {{ .Values.ports.p2p | quote }}
+            - name: AETHER_METRICS_PORT
+              value: {{ .Values.ports.metrics | quote }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
             - name: data
               mountPath: /data/aether
+            - name: genesis
+              mountPath: /config
+              readOnly: true
+            - name: validator-keys
+              mountPath: /keys
+              readOnly: true
           livenessProbe:
             {{- toYaml .Values.livenessProbe | nindent 12 }}
           readinessProbe:
             {{- toYaml .Values.readinessProbe | nindent 12 }}
+      volumes:
+        - name: genesis
+          configMap:
+            name: {{ .Values.genesis.configMapName }}
+            items:
+              - key: genesis.json
+                path: genesis.json
+        - name: validator-keys
+          secret:
+            secretName: {{ .Values.genesis.secretName }}
+            defaultMode: 0440
   volumeClaimTemplates:
     - metadata:
         name: data

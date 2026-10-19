@@ -27,8 +27,8 @@ WASM contracts, and certified blocks commit finalized state to RocksDB.
 | --- | --- |
 | Validator node | VRF leader election, BLS quorum certificates, 2-chain finality, libp2p/TCP peers |
 | Execution and storage | Sequential ledger execution, Wasmtime contracts, pending branch overlays, finalized RocksDB and sparse Merkle state |
-| Client path | JSON-RPC, `aetherctl chain`, Rust SDK signed transfer/deploy/call helpers |
-| E2E validation | In-process multi-node and settlement-library journeys, plus a four-process devnet journey |
+| Client path | JSON-RPC, `aetherctl chain`, Rust SDK helpers, and TypeScript/Python canonical signed-transfer clients; online signing uses node-reported fees |
+| E2E validation | In-process multi-node and settlement-library journeys, plus a four-process devnet journey; client SDK journeys are available and require a live local devnet |
 | Separate libraries | AI mesh, TEE/VCR/KZG verification, agent/job escrow, AIC, AMM, governance, DA, QUIC, and firehose are not an assembled node settlement service |
 
 See [architecture](docs/architecture.md) for source-level wiring and
@@ -56,7 +56,7 @@ with `./scripts/bench/run-benchmarks.sh`; that script starts and resets local de
 
 ```mermaid
 flowchart LR
-    Clients["aetherctl / Rust chain SDK"] --> RPC["JSON-RPC / health<br/>WebSocket surface"]
+    Clients["aetherctl / Rust, TypeScript, Python SDKs<br/>Explorer / wallet"] --> RPC["JSON-RPC / health<br/>WebSocket surface"]
     RPC <--> Core
     subgraph Node["aether-node"]
         Core["Node coordinator<br/>Mempool + slot loop<br/>VRF / BLS / 2-chain consensus"]
@@ -75,6 +75,10 @@ See [Architecture](docs/architecture.md) for the source audit and integration bo
 
 ### Hybrid Consensus
 VRF-based leader election, HotStuff-style BFT voting and BLS aggregate signatures. Blocks outside the genesis/bootstrap exception require a parent quorum certificate (>= 2/3 stake); a block is final when it and its child in the immediately following slot are both certified (2-chain rule; single-validator mode finalizes its own certificate). Blocks execute on in-memory pending state and are written to RocksDB only when final, so competing unfinalized branches do not overwrite finalized state.
+
+Protocol v2 uses a fixed genesis committee. Economic slashing changes bonded
+stake but does not reconfigure consensus membership. Existing node/indexer
+state needs a fresh v2 network; see [migration instructions](docs/migrations/protocol-v2.md).
 
 ### WASM Smart Contracts
 Wasmtime-powered VM with fuel metering, bounded memory and sandboxed execution; contracts are deployed and called with ordinary transactions and their storage is committed to the state root. A read/write-set scheduler for parallel execution exists in `crates/runtime` but block execution is currently sequential.
@@ -95,7 +99,7 @@ The repository contains staking, governance, AMM, job escrow, reputation, AIC to
 Turbine and Reed-Solomon erasure-coding libraries exist. The running node currently broadcasts whole blocks through libp2p/TCP; it does not wire these libraries into block propagation.
 
 ### Observability
-The node starts a Prometheus exporter and provides structured tracing and an RPC health endpoint. Grafana deployment assets are available separately. The firehose is an in-process broadcast library, and the indexer executable has no live node connection yet.
+The node starts a Prometheus exporter and provides structured tracing and RPC health/readiness endpoints. Grafana deployment assets are available separately. The gRPC firehose remains an in-process broadcast library. The standalone indexer polls finalized blocks from a configured node RPC, pins the chain identity and latest-block checkpoint in RocksDB, and serves persisted block summaries; it does not index pending execution.
 
 ## Quick Start
 
@@ -176,6 +180,39 @@ With a validator running, JSON-RPC provides methods including `aeth_getSlotNumbe
 curl -s localhost:8545 -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","method":"aeth_getNodeInfo","params":[],"id":1}'
 ```
+
+### TypeScript and Python clients
+
+The browser apps and SDKs use the node's JSON-RPC endpoint. From the repository
+root, install the web workspace and build the SDK/apps with Node.js 20+ and npm:
+
+```bash
+npm ci
+npm run build:web
+```
+
+With a local four-validator devnet running, exercise each SDK by creating a
+temporary signing key, funding it with the local CLI, submitting a canonical
+signed raw transfer, waiting for successful finality, and checking the recipient
+balance through validator 3:
+
+```bash
+npm run e2e:client
+python3 -m venv work/python-sdk-venv
+work/python-sdk-venv/bin/python -m pip install --upgrade pip setuptools wheel
+work/python-sdk-venv/bin/python -m pip install ./sdks/python
+work/python-sdk-venv/bin/python scripts/client-e2e.py
+```
+
+These journeys need `target/release/aetherctl` and RPC ports 8545 and 8547. Set
+`AETHER_RPC_FROM`, `AETHER_RPC_READ`, or `AETHERCTL_BIN` to use other endpoints or
+the CLI path. The scripts report `PASS` only after Rust accepts the signed raw
+transaction and the second validator reports the exact finalized balance change.
+The TypeScript `npm run dev:explorer` and `npm run dev:wallet` commands serve the
+apps on `127.0.0.1:3000` and `127.0.0.1:3001`; the wallet signs locally in the
+current tab and is scoped to a local/devnet workflow. An explorer status marked
+unavailable means that its configured RPC read failed; it is not a zero-valued
+measurement. Neither app invents validator, stake, uptime, or job data.
 
 ### Benchmarks
 

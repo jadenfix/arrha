@@ -1,3 +1,4 @@
+use aether_types::saturating_mul_div as mul_div;
 // ============================================================================
 // HYBRID CONSENSUS - Phase 1 Full Integration
 // ============================================================================
@@ -13,52 +14,8 @@ use aether_types::{Address, AggregatedVote, Block, PublicKey, Slot, ValidatorInf
 use anyhow::{bail, Result};
 use sha2::{Digest, Sha256};
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
-
-/// Overflow-safe (a * b) / c using 256-bit intermediate product.
-fn mul_div(a: u128, b: u128, c: u128) -> u128 {
-    if c == 0 {
-        return 0;
-    }
-    let a_hi = a >> 64;
-    let a_lo = a & 0xFFFF_FFFF_FFFF_FFFF;
-    let b_hi = b >> 64;
-    let b_lo = b & 0xFFFF_FFFF_FFFF_FFFF;
-
-    let lo_lo = a_lo * b_lo;
-    let hi_lo = a_hi * b_lo;
-    let lo_hi = a_lo * b_hi;
-    let hi_hi = a_hi * b_hi;
-
-    let mid = hi_lo + (lo_lo >> 64);
-    let mid = mid + lo_hi;
-    let carry = if mid < lo_hi { 1u128 } else { 0u128 };
-
-    let product_lo = (mid << 64) | (lo_lo & 0xFFFF_FFFF_FFFF_FFFF);
-    let product_hi = hi_hi + (mid >> 64) + carry;
-
-    div_256_by_128(product_hi, product_lo, c)
-}
-
-fn div_256_by_128(hi: u128, lo: u128, divisor: u128) -> u128 {
-    if hi == 0 {
-        return lo / divisor;
-    }
-    if hi >= divisor {
-        return u128::MAX;
-    }
-    let mut remainder = hi;
-    let mut quotient: u128 = 0;
-    for i in (0..128).rev() {
-        remainder = (remainder << 1) | ((lo >> i) & 1);
-        if remainder >= divisor {
-            remainder -= divisor;
-            quotient |= 1u128 << i;
-        }
-    }
-    quotient
-}
 
 /// Votes are accepted for blocks up to this many slots old. Validators run
 /// in separate processes, so a vote for slot `s` routinely arrives after the
@@ -104,7 +61,8 @@ pub struct HybridConsensus {
     total_stake: u128,
 
     /// Epoch-frozen validator snapshot used for leader election.
-    /// Prevents mid-epoch stake changes from altering leader schedules.
+    /// Fixed genesis committee for protocol v2; stake reconfiguration is only
+    /// safe after a finalized on-chain transition is implemented.
     epoch_validators: HashMap<Address, ValidatorInfo>,
     epoch_total_stake: u128,
 
@@ -112,6 +70,9 @@ pub struct HybridConsensus {
     current_slot: Slot,
     current_epoch: u64,
     epoch_randomness: H256,
+    /// Seed changes indexed by the first slot that uses each seed. This lets
+    /// peers validate delayed blocks with the same historical VRF input.
+    randomness_history: BTreeMap<Slot, H256>,
     epoch_length: u64,
     /// Whether epoch randomness has been updated from a real VRF output this epoch.
     epoch_randomness_updated: bool,
@@ -216,6 +177,7 @@ impl HybridConsensus {
             current_slot: 0,
             current_epoch: 0,
             epoch_randomness: H256::zero(),
+            randomness_history: BTreeMap::from([(0, H256::zero())]),
             epoch_length,
             epoch_randomness_updated: false,
             tau_numerator,
@@ -331,7 +293,8 @@ impl HybridConsensus {
 
         // Compute VRF input: epoch_randomness || slot
         let mut input = Vec::new();
-        input.extend_from_slice(self.epoch_randomness.as_bytes());
+        let randomness = self.randomness_for_slot(slot);
+        input.extend_from_slice(randomness.as_bytes());
         input.extend_from_slice(&slot.to_le_bytes());
 
         let proof = VrfSigner::prove(vrf_keypair.as_ref(), &input);
@@ -366,7 +329,8 @@ impl HybridConsensus {
 
         // Reconstruct VRF input
         let mut input = Vec::new();
-        input.extend_from_slice(self.epoch_randomness.as_bytes());
+        let randomness = self.randomness_for_slot(block.header.slot);
+        input.extend_from_slice(randomness.as_bytes());
         input.extend_from_slice(&block.header.slot.to_le_bytes());
 
         // Convert VRF proof
@@ -466,7 +430,34 @@ impl HybridConsensus {
         hasher.update(self.current_epoch.to_le_bytes());
         self.epoch_randomness = H256::from(<[u8; 32]>::from(hasher.finalize()));
         self.epoch_randomness_updated = true;
+        self.randomness_history
+            .insert(self.current_slot.saturating_add(1), self.epoch_randomness);
         true
+    }
+
+    fn randomness_for_slot(&self, slot: Slot) -> H256 {
+        if slot > self.current_slot {
+            let mut seed = self.epoch_randomness;
+            let mut epoch = self.current_epoch;
+            let mut updated = self.epoch_randomness_updated;
+            while epoch < slot / self.epoch_length {
+                let boundary_slot = epoch.saturating_add(1).saturating_mul(self.epoch_length);
+                if !updated {
+                    let mut hasher = Sha256::new();
+                    hasher.update(seed.as_bytes());
+                    hasher.update(boundary_slot.to_le_bytes());
+                    hasher.update(epoch.to_le_bytes());
+                    seed = H256::from(<[u8; 32]>::from(hasher.finalize()));
+                }
+                epoch = epoch.saturating_add(1);
+                updated = false;
+            }
+            return seed;
+        }
+        if let Some((_, seed)) = self.randomness_history.range(..=slot).next_back() {
+            return *seed;
+        }
+        self.epoch_randomness
     }
 
     /// Whether epoch randomness has already been updated from a real VRF output.
@@ -906,12 +897,16 @@ impl ConsensusEngine for HybridConsensus {
             }
             self.epoch_randomness_updated = false;
             self.current_epoch = self.current_epoch.saturating_add(1);
+            self.randomness_history
+                .insert(self.current_slot, self.epoch_randomness);
+            let oldest_slot = self.current_slot.saturating_sub(10_000 * self.epoch_length);
+            self.randomness_history
+                .retain(|slot, _| *slot >= oldest_slot);
 
-            // Snapshot the current validator set for the new epoch.
-            // Leader election uses this frozen snapshot so mid-epoch slashing
-            // doesn't retroactively alter the leader schedule.
-            self.epoch_validators = self.validators.clone();
-            self.epoch_total_stake = self.total_stake;
+            // Protocol v2 keeps the genesis committee fixed across epochs.
+            // Slashing changes economic stake immediately, but committee
+            // reconfiguration requires finalized on-chain state and is not yet
+            // implemented; local slash arrival order must not change consensus.
         }
     }
 
@@ -1010,6 +1005,16 @@ impl ConsensusEngine for HybridConsensus {
         self.validators.get(address).map_or(0, |v| v.stake)
     }
 
+    fn validator_stake_at_slot(&self, address: &Address, slot: Slot) -> u128 {
+        let _ = slot;
+        self.epoch_validators.get(address).map_or(0, |v| v.stake)
+    }
+
+    fn total_stake_at_slot(&self, slot: Slot) -> u128 {
+        let _ = slot;
+        self.epoch_total_stake
+    }
+
     fn is_timed_out(&self) -> bool {
         self.pacemaker.is_timed_out()
     }
@@ -1055,6 +1060,20 @@ impl ConsensusEngine for HybridConsensus {
             .filter(|(_, v)| v.stake > 0)
             .map(|(addr, v)| (*addr, v.stake))
             .collect()
+    }
+
+    fn validator_addresses_and_stakes_at_epoch(&self, epoch: u64) -> Vec<(Address, u128)> {
+        let _ = epoch;
+        self.epoch_validators
+            .iter()
+            .filter(|(_, validator)| validator.stake > 0)
+            .map(|(address, validator)| (*address, validator.stake))
+            .collect()
+    }
+
+    fn total_stake_at_epoch(&self, epoch: u64) -> u128 {
+        let _ = epoch;
+        self.epoch_total_stake
     }
 
     fn on_qc(&mut self, qc: &AggregatedVote) {

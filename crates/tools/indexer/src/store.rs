@@ -7,6 +7,16 @@ use std::path::Path;
 const CF_BLOCKS: &str = "indexed_blocks";
 const CF_TX_INDEX: &str = "tx_to_slot";
 const CF_META: &str = "indexer_meta";
+const META_CHAIN_IDENTITY: &[u8] = b"chain_identity";
+
+/// RPC identity pinned to this persistent index. The genesis hash and full
+/// chain fingerprint distinguish networks that reuse a numeric chain ID.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ChainIdentity {
+    pub chain_id: u64,
+    pub genesis_hash: String,
+    pub chain_identity: String,
+}
 
 /// Indexed block record stored in RocksDB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +52,40 @@ impl PersistentStore {
         Ok(PersistentStore { db })
     }
 
+    /// Pin an empty index to a chain or verify the identity already stored.
+    /// Existing block data without identity metadata is rejected because its
+    /// source chain cannot be established safely.
+    pub fn ensure_chain_identity(&self, identity: &ChainIdentity) -> Result<()> {
+        let cf = self.db.cf_handle(CF_META).context("missing meta CF")?;
+        match self.db.get_cf(cf, META_CHAIN_IDENTITY)? {
+            Some(bytes) => {
+                let stored: ChainIdentity =
+                    bincode::deserialize(&bytes).context("invalid stored chain identity")?;
+                if stored != *identity {
+                    anyhow::bail!(
+                        "index database belongs to chain_id={} genesis_hash={} chain_identity={}, RPC reports chain_id={} genesis_hash={} chain_identity={}",
+                        stored.chain_id,
+                        stored.genesis_hash,
+                        stored.chain_identity,
+                        identity.chain_id,
+                        identity.genesis_hash,
+                        identity.chain_identity
+                    );
+                }
+            }
+            None => {
+                if self.db.get_cf(cf, b"latest_slot")?.is_some() || self.block_count()? > 0 {
+                    anyhow::bail!(
+                        "index database contains blocks but has no chain identity; configure a fresh INDEXER_DB_PATH to reindex safely"
+                    );
+                }
+                self.db
+                    .put_cf(cf, META_CHAIN_IDENTITY, bincode::serialize(identity)?)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Ingest a block into the index.
     ///
     /// All writes (block record, tx→slot index, latest_slot) are committed in a
@@ -59,10 +103,24 @@ impl PersistentStore {
         let key = block.header.slot.to_be_bytes();
         let value = bincode::serialize(&indexed)?;
 
+        let blocks_cf = self.db.cf_handle(CF_BLOCKS).context("missing blocks CF")?;
+        if let Some(bytes) = self.db.get_cf(blocks_cf, key)? {
+            let existing: IndexedBlock =
+                bincode::deserialize(&bytes).context("invalid stored block record")?;
+            if existing.hash != indexed.hash {
+                anyhow::bail!(
+                    "refusing to replace finalized slot {} with a different block hash (stored {:?}, received {:?})",
+                    block.header.slot,
+                    existing.hash,
+                    indexed.hash
+                );
+            }
+            return Ok(());
+        }
+
         let mut batch = WriteBatch::default();
 
-        let cf = self.db.cf_handle(CF_BLOCKS).context("missing blocks CF")?;
-        batch.put_cf(cf, key, &value);
+        batch.put_cf(blocks_cf, key, &value);
 
         // Index each transaction hash → slot
         let tx_cf = self
@@ -71,6 +129,18 @@ impl PersistentStore {
             .context("missing tx_index CF")?;
         for tx in &block.transactions {
             let tx_hash = tx.hash();
+            if let Some(existing_slot) = self.db.get_cf(tx_cf, tx_hash.as_bytes())? {
+                let slot_bytes: [u8; 8] = existing_slot
+                    .as_slice()
+                    .try_into()
+                    .context("invalid transaction index slot bytes")?;
+                if u64::from_be_bytes(slot_bytes) != block.header.slot {
+                    anyhow::bail!(
+                        "transaction {:?} is already indexed at a different finalized slot",
+                        tx_hash
+                    );
+                }
+            }
             batch.put_cf(tx_cf, tx_hash.as_bytes(), key);
         }
 
@@ -123,13 +193,33 @@ impl PersistentStore {
         }
     }
 
-    /// Count total indexed blocks (approximate — scans CF).
+    /// Read the most recent persisted block as the restart/reconnect checkpoint.
+    pub fn checkpoint(&self) -> Result<Option<IndexedBlock>> {
+        let cf = self.db.cf_handle(CF_META).context("missing meta CF")?;
+        let Some(bytes) = self.db.get_cf(cf, b"latest_slot")? else {
+            if self.block_count()? == 0 {
+                return Ok(None);
+            }
+            anyhow::bail!("index database has blocks but no checkpoint metadata");
+        };
+        let slot_bytes: [u8; 8] = bytes
+            .as_slice()
+            .try_into()
+            .context("invalid latest slot bytes")?;
+        let slot = u64::from_be_bytes(slot_bytes);
+        self.get_block(slot)?.map(Some).ok_or_else(|| {
+            anyhow::anyhow!("index checkpoint metadata points to missing slot {slot}")
+        })
+    }
+
+    /// Count indexed blocks, propagating any RocksDB iterator errors.
     pub fn block_count(&self) -> Result<usize> {
         let cf = self.db.cf_handle(CF_BLOCKS).context("missing blocks CF")?;
-        let count = self
-            .db
+        self.db
             .iterator_cf(cf, rocksdb::IteratorMode::Start)
-            .count();
-        Ok(count)
+            .try_fold(0usize, |count, entry| {
+                entry.context("iterate indexed blocks")?;
+                count.checked_add(1).context("indexed block count overflow")
+            })
     }
 }

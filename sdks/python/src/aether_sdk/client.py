@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -8,8 +9,10 @@ from typing import Any, Dict, Optional, Union
 
 from .builders import JobBuilder, TransferBuilder
 from .transaction import Transaction
+from .transaction import FeeParameters
 from .types import (
     ClientConfig,
+    AirdropResponse,
     JobRequest,
     JobSubmission,
     NodeHealth,
@@ -53,13 +56,64 @@ class AetherClient:
         return JobBuilder(self.endpoint)
 
     def submit(self, transaction: Transaction) -> SubmitResponse:
-        tx_hash = self._rpc_call(
-            "aeth_sendTransaction",
-            [transaction.to_rpc_transaction()],
-        )
+        tx_hash = self._rpc_call("aeth_sendRawTransaction", [transaction.to_raw_hex()])
         if not isinstance(tx_hash, str):
             raise ValueError("rpc response did not include a transaction hash")
+        if tx_hash.lower() != transaction.hash().lower():
+            raise ValueError(f"node returned transaction hash {tx_hash}, expected {transaction.hash()}")
         return SubmitResponse(tx_hash=tx_hash, accepted=True)
+
+    def get_chain_id(self) -> int:
+        value = self._rpc_call("aeth_chainId", [])
+        if not isinstance(value, str) or not value.startswith("0x"):
+            raise ValueError("aeth_chainId returned invalid hex")
+        try:
+            return int(value, 16)
+        except ValueError as exc:
+            raise ValueError("aeth_chainId returned invalid hex") from exc
+
+    def get_fee_parameters(self) -> FeeParameters:
+        value = self._rpc_call("aeth_getFeeParameters", [])
+        if not isinstance(value, dict):
+            raise ValueError("aeth_getFeeParameters returned an invalid response")
+        return FeeParameters.from_dict(value)
+
+    def get_pending_account(self, address: str) -> Optional[RpcAccountState]:
+        return self._rpc_call("aeth_getPendingAccount", [address])
+
+    def request_airdrop(self, address: str, amount: int) -> AirdropResponse:
+        if amount <= 0:
+            raise ValueError("airdrop amount must be positive")
+        result = self._rpc_call("aeth_requestAirdrop", [address, str(amount)])
+        if not isinstance(result, dict) or result.get("success") is not True:
+            raise ValueError("aeth_requestAirdrop returned an invalid acknowledgement")
+        return AirdropResponse(success=True)
+
+    def get_transaction_status(self, tx_hash: str) -> Dict[str, Any]:
+        result = self._rpc_call("aeth_getTransactionStatus", [tx_hash])
+        if not isinstance(result, dict):
+            raise ValueError("transaction status response was invalid")
+        return result
+
+    def wait_for_finality(
+        self,
+        tx_hash: str,
+        *,
+        timeout_seconds: float = 60.0,
+        poll_seconds: float = 0.5,
+    ) -> RpcReceipt:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            status = self.get_transaction_status(tx_hash)
+            if status.get("status") == "finalized":
+                if status.get("success") is not True:
+                    raise ValueError(f"transaction {tx_hash} finalized with failure: {status.get('error')}")
+                receipt = self.get_transaction_receipt(tx_hash)
+                if receipt is None:
+                    raise ValueError(f"finalized transaction {tx_hash} has no receipt")
+                return receipt
+            time.sleep(poll_seconds)
+        raise TimeoutError(f"transaction {tx_hash} did not finalize within {timeout_seconds} seconds")
 
     def get_slot_number(self) -> int:
         slot = self._rpc_call("aeth_getSlotNumber", [])

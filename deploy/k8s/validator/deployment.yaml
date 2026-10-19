@@ -1,24 +1,12 @@
-# ============================================================================
-# AETHER VALIDATOR - Kubernetes Deployment
-# ============================================================================
-# PURPOSE: Production-ready validator deployment for testnet/mainnet
-#
-# FEATURES:
-#   - Anti-affinity (spread across failure domains)
-#   - Local NVMe volumes
-#   - Resource limits
-#   - Liveness/readiness probes
-#   - Metrics scraping
-# ============================================================================
-
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: aether-validator
   namespace: aether
 spec:
-  serviceName: "aether-validator"
-  replicas: 1
+  podManagementPolicy: Parallel
+  serviceName: aether-validator
+  replicas: 4
   selector:
     matchLabels:
       app: aether-validator
@@ -29,71 +17,146 @@ spec:
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "9090"
+        prometheus.io/path: /metrics
     spec:
+      securityContext:
+        fsGroup: 1000
       affinity:
         podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchExpressions:
-                  - key: app
-                    operator: In
-                    values:
-                      - aether-validator
-              topologyKey: "kubernetes.io/hostname"
-      
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: aether-validator
+                topologyKey: kubernetes.io/hostname
       containers:
-      - name: validator
-        image: aether/validator:latest
-        ports:
-          - containerPort: 9000
-            name: p2p
-          - containerPort: 9090
-            name: metrics
-        
-        env:
-          - name: VALIDATOR_KEY
-            valueFrom:
-              secretKeyRef:
-                name: validator-keys
-                key: validator.json
-          - name: GENESIS_FILE
-            value: "/config/genesis.json"
-        
-        volumeMounts:
-          - name: data
-            mountPath: /data
-          - name: config
-            mountPath: /config
-        
+        - name: validator
+          image: aether-node:operator-supplied
+          imagePullPolicy: IfNotPresent
+          command: ["/app/scripts/docker-entrypoint.sh"]
+          ports:
+            - containerPort: 8545
+              name: rpc
+            - containerPort: 9000
+              name: p2p
+            - containerPort: 9090
+              name: metrics
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NUM_VALIDATORS
+              value: "4"
+            - name: AETHER_GENESIS_DIR
+              value: /config
+            - name: AETHER_GENESIS_PATH
+              value: /config/genesis.json
+            - name: AETHER_KEY_DIR
+              value: /keys
+            - name: AETHER_NODE_DB_PATH
+              value: /data/aether
+            - name: AETHER_RPC_BIND_IP
+              value: 0.0.0.0
+            - name: AETHER_RPC_PORT
+              value: "8545"
+            - name: AETHER_P2P_PORT
+              value: "9000"
+            - name: AETHER_HEADLESS_SERVICE
+              value: aether-validator
+            - name: AETHER_METRICS_PORT
+              value: "9090"
+            - name: AETHER_BOOTSTRAP_PEERS
+              value: ""
+            - name: RUST_LOG
+              value: info
+          volumeMounts:
+            - name: data
+              mountPath: /data/aether
+            - name: genesis
+              mountPath: /config
+              readOnly: true
+            - name: validator-keys
+              mountPath: /keys
+              readOnly: true
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+            limits:
+              cpu: "8"
+              memory: 32Gi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: rpc
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: rpc
+            initialDelaySeconds: 10
+            periodSeconds: 5
+      volumes:
+        # Operators provide these resources with one genesis.json and
+        # validator-1.key through validator-4.key from the same ceremony.
+        - name: genesis
+          configMap:
+            name: aether-genesis
+            items:
+              - key: genesis.json
+                path: genesis.json
+        - name: validator-keys
+          secret:
+            secretName: validator-keys
+            defaultMode: 0440
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: local-nvme
         resources:
           requests:
-            cpu: "16"
-            memory: "128Gi"
-          limits:
-            cpu: "32"
-            memory: "256Gi"
-        
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 9090
-          initialDelaySeconds: 30
-          periodSeconds: 10
-        
-        readinessProbe:
-          httpGet:
-            path: /ready
-            port: 9090
-          initialDelaySeconds: 10
-          periodSeconds: 5
-  
-  volumeClaimTemplates:
-  - metadata:
-      name: data
-    spec:
-      accessModes: [ "ReadWriteOnce" ]
-      storageClassName: "local-nvme"
-      resources:
-        requests:
-          storage: 2Ti
-
+            storage: 2Ti
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aether-validator
+  namespace: aether
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: aether-validator
+  ports:
+    - name: rpc
+      port: 8545
+      targetPort: rpc
+    - name: p2p
+      port: 9000
+      targetPort: p2p
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aether-rpc
+  namespace: aether
+spec:
+  type: ClusterIP
+  selector:
+    app: aether-validator
+  ports:
+    - name: rpc
+      port: 8545
+      targetPort: rpc

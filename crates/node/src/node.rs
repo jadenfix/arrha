@@ -7,16 +7,17 @@ use aether_ledger::{
 };
 use aether_mempool::Mempool;
 use aether_p2p::network::NetworkEvent;
-use aether_program_staking::StakingState;
+use aether_program_staking::{StakingState, Validator as StakingValidator};
 use aether_state_snapshots::generate_snapshot;
 use aether_state_storage::{
     database::pruning, Storage, StorageBatch, CF_BLOCKS, CF_METADATA, CF_RECEIPTS, CF_STAKING,
 };
+use aether_types::saturating_mul_div as mul_div;
 use aether_types::{
-    Account, Address, AggregatedVote, Block, ChainConfig, PublicKey, Slot, Transaction,
-    TransactionReceipt, Vote, H256,
+    Account, Address, AggregatedVote, Block, ChainConfig, PublicKey, SlashEvidence, Slot,
+    Transaction, TransactionReceipt, TransactionStatus, Vote, H256,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Write as _;
@@ -27,51 +28,6 @@ use tokio::sync::mpsc;
 use tokio::time;
 
 use aether_metrics::{CONSENSUS_METRICS, NODE_METRICS, STORAGE_METRICS};
-
-/// Overflow-safe (a * b) / c using 256-bit intermediate product.
-/// Avoids silent truncation when a*b overflows u128 (e.g. emission * stake).
-fn mul_div(a: u128, b: u128, c: u128) -> u128 {
-    if c == 0 {
-        return 0;
-    }
-    let a_hi = a >> 64;
-    let a_lo = a & 0xFFFF_FFFF_FFFF_FFFF;
-    let b_hi = b >> 64;
-    let b_lo = b & 0xFFFF_FFFF_FFFF_FFFF;
-
-    let lo_lo = a_lo * b_lo;
-    let hi_lo = a_hi * b_lo;
-    let lo_hi = a_lo * b_hi;
-    let hi_hi = a_hi * b_hi;
-
-    let mid = hi_lo + (lo_lo >> 64);
-    let mid = mid + lo_hi;
-    let carry = if mid < lo_hi { 1u128 } else { 0u128 };
-
-    let product_lo = (mid << 64) | (lo_lo & 0xFFFF_FFFF_FFFF_FFFF);
-    let product_hi = hi_hi + (mid >> 64) + carry;
-
-    div_256_by_128(product_hi, product_lo, c)
-}
-
-fn div_256_by_128(hi: u128, lo: u128, divisor: u128) -> u128 {
-    if hi == 0 {
-        return lo / divisor;
-    }
-    if hi >= divisor {
-        return u128::MAX;
-    }
-    let mut remainder = hi;
-    let mut quotient: u128 = 0;
-    for i in (0..128).rev() {
-        remainder = (remainder << 1) | ((lo >> i) & 1);
-        if remainder >= divisor {
-            remainder -= divisor;
-            quotient |= 1u128 << i;
-        }
-    }
-    quotient
-}
 
 use crate::fork_choice::ForkChoice;
 use crate::network_handler::{decode_network_event, NodeMessage, OutboundMessage};
@@ -105,6 +61,11 @@ const MAX_TX_GOSSIP_BATCH: usize = 1500;
 /// Metadata keys for finalized-chain bookkeeping that must survive restarts.
 const META_BASE_FEE: &[u8] = b"base_fee";
 const META_TIP_QC: &[u8] = b"finalized_tip_qc";
+const META_CHAIN_IDENTITY: &[u8] = b"chain_identity";
+const META_PROTOCOL_VERSION: &[u8] = b"protocol_version";
+const META_SLASHED_OFFENSES: &[u8] = b"slashed_offenses";
+const META_PENDING_SLASH_EVIDENCE: &[u8] = b"pending_slash_evidence";
+const MAX_PENDING_SLASH_EVIDENCE: usize = 128;
 
 /// Milliseconds since the Unix epoch.
 pub fn unix_millis() -> u64 {
@@ -119,6 +80,7 @@ pub fn unix_millis() -> u64 {
 /// Its state lives in an in-memory overlay chained to its parent's overlay;
 /// nothing touches RocksDB until the block is finalized, so competing forks
 /// can be executed side by side and the losing branch is simply dropped.
+#[derive(Clone)]
 struct PendingBlock {
     block: Block,
     overlay: Arc<PendingOverlay>,
@@ -128,6 +90,11 @@ struct PendingBlock {
     receipts: Vec<TransactionReceipt>,
     /// Fee market state after this block.
     fee_market: FeeMarket,
+    /// Branch-local staking state, including any unbondings completed by this
+    /// block. It is adopted only when this block finalizes.
+    staking_state: StakingState,
+    slash_events: Vec<(Address, Slot, u128)>,
+    slashed_offenses: HashSet<(Address, Slot)>,
 }
 
 /// Output of executing a block on top of its parent.
@@ -136,8 +103,11 @@ struct ExecutedBlock {
     overlay: PendingOverlay,
     tree: SparseMerkleTree,
     fee_market: FeeMarket,
-    /// State root after the block's transactions (before fee distribution);
-    /// this is what the block header commits to.
+    staking_state: StakingState,
+    slash_events: Vec<(Address, Slot, u128)>,
+    slashed_offenses: HashSet<(Address, Slot)>,
+    /// State root after all block effects, including fee distribution.
+    /// This is the state committed by the header and adopted on finalization.
     state_root: H256,
     receipts_root: H256,
 }
@@ -221,6 +191,11 @@ pub struct Node {
     /// Tracks (validator, slot) pairs that have already been slashed to prevent
     /// double-slashing the same offense via both vote-time detection and block evidence.
     slashed_offenses: HashSet<(Address, u64)>,
+    /// Ephemeral duplicate suppression for diagnostic vote-time stake changes.
+    detected_offenses: HashSet<(Address, u64)>,
+    /// Verified proofs waiting for block inclusion. Retained across losing
+    /// branches and removed only after a canonical block commits the offense.
+    pending_slash_evidence: HashMap<(Address, Slot), SlashEvidence>,
     /// Slots at which this validator has already cast a vote, preventing
     /// accidental double-votes when multiple blocks arrive for the same slot.
     voted_slots: HashSet<u64>,
@@ -278,6 +253,25 @@ pub struct Node {
 }
 
 impl Node {
+    /// Bind this database to the exact chain configuration and genesis identity.
+    /// Legacy databases without an identity are bound once; subsequent starts
+    /// must present the same identity.
+    pub fn bind_chain_identity(&mut self, identity: H256) -> Result<()> {
+        match self
+            .ledger
+            .storage()
+            .get(CF_METADATA, META_CHAIN_IDENTITY)?
+        {
+            Some(bytes) if bytes.as_slice() == identity.as_bytes() => Ok(()),
+            Some(_) => bail!("database chain identity does not match configured chain"),
+            None => {
+                self.ledger
+                    .storage()
+                    .put(CF_METADATA, META_CHAIN_IDENTITY, identity.as_bytes())
+            }
+        }
+    }
+
     pub fn new<P: AsRef<Path>>(
         db_path: P,
         mut consensus: Box<dyn ConsensusEngine>,
@@ -286,6 +280,26 @@ impl Node {
         chain_config: Arc<ChainConfig>,
     ) -> Result<Self> {
         let storage = Storage::open(db_path).context("failed to open storage")?;
+        match storage.get(CF_METADATA, META_PROTOCOL_VERSION)? {
+            Some(bytes) if bytes.len() == 4 => {
+                let stored = u32::from_le_bytes(bytes.try_into().expect("checked length"));
+                if stored != aether_types::PROTOCOL_VERSION {
+                    bail!(
+                        "database protocol version {stored} is incompatible with node protocol {}",
+                        aether_types::PROTOCOL_VERSION
+                    );
+                }
+            }
+            Some(_) => bail!("database protocol version marker is malformed"),
+            None if storage.iterator(CF_BLOCKS)?.next().is_some() => {
+                bail!("refusing non-empty legacy database without a protocol version marker")
+            }
+            None => storage.put(
+                CF_METADATA,
+                META_PROTOCOL_VERSION,
+                &aether_types::PROTOCOL_VERSION.to_le_bytes(),
+            )?,
+        }
         let ledger = Ledger::new(storage).context("failed to initialize ledger")?;
         let mempool = Mempool::new(
             chain_config.fees.clone(),
@@ -318,8 +332,63 @@ impl Node {
                 );
                 state
             }
-            _ => StakingState::new(),
+            Ok(None) => {
+                // The consensus committee is trusted genesis input. Seed the
+                // native staking ledger from it so canonical slash evidence
+                // has economic state to update on a fresh node.
+                let mut state = StakingState::new();
+                for (address, stake) in consensus.validator_addresses_and_stakes_at_epoch(0) {
+                    if stake == 0 || state.get_validator(&address).is_some() {
+                        continue;
+                    }
+                    state.total_staked = state
+                        .total_staked
+                        .checked_add(stake)
+                        .context("genesis staking total overflow")?;
+                    state.validators.push(StakingValidator {
+                        address,
+                        staked_amount: stake,
+                        delegated_amount: 0,
+                        commission_rate: 0,
+                        reward_address: address,
+                        is_active: true,
+                        jailed_until: None,
+                        slash_count: 0,
+                    });
+                }
+                state
+            }
+            Err(error) => {
+                return Err(error).context("failed to read persisted staking state");
+            }
         };
+        let slashed_offenses: HashSet<(Address, Slot)> = ledger
+            .storage()
+            .get(CF_METADATA, META_SLASHED_OFFENSES)?
+            .map(|bytes| bincode::deserialize(&bytes))
+            .transpose()
+            .context("failed to deserialize persisted slash offense set")?
+            .unwrap_or_default();
+        let mut pending_slash_evidence: HashMap<(Address, Slot), SlashEvidence> = ledger
+            .storage()
+            .get(CF_METADATA, META_PENDING_SLASH_EVIDENCE)?
+            .map(|bytes| bincode::deserialize(&bytes))
+            .transpose()
+            .context("failed to deserialize persisted pending slash evidence")?
+            .unwrap_or_default();
+        ensure!(
+            pending_slash_evidence.len() <= MAX_PENDING_SLASH_EVIDENCE,
+            "persisted pending slash evidence exceeds the bounded queue limit"
+        );
+        let previous_pending_count = pending_slash_evidence.len();
+        pending_slash_evidence.retain(|key, _| !slashed_offenses.contains(key));
+        if pending_slash_evidence.len() != previous_pending_count {
+            ledger.storage().put(
+                CF_METADATA,
+                META_PENDING_SLASH_EVIDENCE,
+                &bincode::serialize(&pending_slash_evidence)?,
+            )?;
+        }
 
         if !blocks_by_hash.is_empty() {
             tracing::info!(
@@ -398,7 +467,9 @@ impl Node {
             outbound_buffer: VecDeque::new(),
             consecutive_timeouts: 0,
             slashing_detector: SlashingDetector::new(),
-            slashed_offenses: HashSet::new(),
+            slashed_offenses,
+            detected_offenses: HashSet::new(),
+            pending_slash_evidence,
             voted_slots: HashSet::new(),
             sync_manager: SyncManager::new(10),
             peer_count: 0,
@@ -846,73 +917,13 @@ impl Node {
         });
     }
 
-    /// Process epoch transition: distribute staking rewards.
+    /// Perform non-consensus maintenance at an epoch boundary. Consensus state
+    /// changes such as rewards and unbonding completions are applied by block
+    /// execution, never by this wall-clock callback.
     fn process_epoch_transition(&mut self, new_epoch: u64) -> Result<()> {
         let _span = tracing::info_span!("epoch_transition", epoch = new_epoch).entered();
 
         let slot = self.consensus.current_slot();
-        let total_supply = self.chain_config.tokens.swr_initial_supply;
-        let emission = self.emission_schedule.epoch_emission(slot, total_supply);
-
-        if emission == 0 {
-            return Ok(());
-        }
-
-        let total_stake = self.consensus.total_stake();
-        if total_stake == 0 {
-            return Ok(());
-        }
-
-        tracing::info!(
-            prev_epoch = new_epoch - 1,
-            new_epoch,
-            emission,
-            "Distributing emission rewards"
-        );
-
-        // ATOMIC EPOCH COMMIT: batch all emission rewards and unbonding returns
-        // into a single WriteBatch so a crash mid-epoch cannot leave some
-        // validators credited and others not.
-        let mut epoch_batch = StorageBatch::new();
-
-        // Credit emission proportionally to ALL validators based on stake.
-        // Every node must credit the same set of validators so state roots
-        // stay consistent across the network. The previous code only credited
-        // the local validator, causing state divergence at epoch boundaries.
-        let mut validators_credited = 0u64;
-        for (addr, stake) in self.consensus.validator_addresses_and_stakes() {
-            let share = mul_div(emission, stake, total_stake);
-            if share > 0 {
-                self.ledger
-                    .credit_account_to_batch(&mut epoch_batch, &addr, share)?;
-                validators_credited += 1;
-            }
-        }
-        tracing::info!(
-            validators_credited,
-            emission,
-            "Credited epoch emission to validators"
-        );
-
-        // Complete unbonding: return tokens to delegators whose unbonding period
-        // has elapsed. complete_unbonding() returns (address, amount) pairs.
-        let completed = self.staking_state.complete_unbonding(slot);
-        for (addr, amount) in &completed {
-            self.ledger
-                .credit_account_to_batch(&mut epoch_batch, addr, *amount)?;
-        }
-
-        // Persist staking state (unbonding queue was drained above) atomically
-        // with the epoch credits so a crash cannot lose unbonding completions.
-        self.persist_staking_state_to_batch(&mut epoch_batch)?;
-
-        // Single atomic write for all epoch credits + staking state
-        self.ledger.write_batch(epoch_batch)?;
-
-        for (addr, amount) in &completed {
-            tracing::info!(?addr, amount, "Returned unbonded tokens");
-        }
-
         // Prune old blocks and receipts from disk to prevent unbounded DB growth.
         let retention = self.chain_config.chain.retention_epochs;
         if retention > 0 && new_epoch > retention {
@@ -1012,14 +1023,12 @@ impl Node {
             }
         }
 
-        // Prune fork choice, slashing detector, and slashed-offenses set for finalized slots.
-        // slashed_offenses is keyed by slot; entries older than finalized are safe to remove
-        // because finalized blocks cannot be re-submitted as new evidence.
+        // Prune transient fork/vote state. Canonical slash offense IDs are
+        // persisted and retained so old evidence cannot be replayed after restart.
         let finalized = self.consensus.finalized_slot();
         self.fork_choice.prune_before(finalized);
         self.slashing_detector.prune_before(finalized);
         self.committed_at_slot.retain(|&slot, _| slot >= finalized);
-        self.slashed_offenses.retain(|&(_, slot)| slot >= finalized);
         self.voted_slots.retain(|&slot| slot >= finalized);
 
         // Prune stale orphan blocks whose slots are at or before the finalized slot.
@@ -1068,26 +1077,85 @@ impl Node {
         parent_hash: &H256,
         proposer: &Address,
         transactions: &[Transaction],
+        slash_evidence: &[SlashEvidence],
         context: BlockContext,
     ) -> Result<ExecutedBlock> {
         let (parent_overlay, tree, mut fee_market) = self
             .parent_state(parent_hash)
             .ok_or_else(|| anyhow::anyhow!("parent state unavailable for {parent_hash:?}"))?;
-        let (receipts, mut overlay, mut tree) = self.ledger.apply_block_on(
+        let (mut receipts, mut overlay, mut tree) = self.ledger.apply_block_on(
             parent_overlay,
             tree,
             transactions,
             Some(self.chain_config.chain.chain_id_numeric),
             context,
         )?;
-        let state_root = overlay.state_root;
-        let receipts_root = compute_receipts_root(&receipts);
-        let total_fees: u128 = transactions
-            .iter()
-            .fold(0u128, |acc, tx| acc.saturating_add(tx.fee));
-        let gas_used: u64 = transactions
-            .iter()
-            .fold(0u64, |acc, tx| acc.saturating_add(tx.gas_limit));
+        let mut branch_staking_state = self
+            .pending
+            .get(parent_hash)
+            .map(|pending| pending.staking_state.clone())
+            .unwrap_or_else(|| self.staking_state.clone());
+        let mut branch_slashed_offenses = self
+            .pending
+            .get(parent_hash)
+            .map(|pending| pending.slashed_offenses.clone())
+            .unwrap_or_else(|| self.slashed_offenses.clone());
+        let slash_events = self.apply_slash_evidence_to_state(
+            slash_evidence,
+            context.slot,
+            &mut branch_staking_state,
+            &mut branch_slashed_offenses,
+        );
+        let completed_unbondings = branch_staking_state.complete_unbonding(context.slot);
+        // Epoch emissions are branch-local block effects. A child block that
+        // crosses one or more epoch boundaries carries every crossed reward
+        // exactly once in its overlay; ticks and restarts never mutate balances.
+        let parent_slot = self
+            .block_slot(parent_hash)
+            .ok_or_else(|| anyhow::anyhow!("parent slot unavailable for {parent_hash:?}"))?;
+        let epoch_slots = self.chain_config.chain.epoch_slots.max(1);
+        let first_reward_epoch = parent_slot / epoch_slots + 1;
+        let last_reward_epoch = context.slot / epoch_slots;
+        let mut credits = completed_unbondings;
+        if first_reward_epoch <= last_reward_epoch {
+            let supply = self.chain_config.tokens.swr_initial_supply;
+            for epoch in first_reward_epoch..=last_reward_epoch {
+                let total_stake = self.consensus.total_stake_at_epoch(epoch);
+                if total_stake == 0 {
+                    continue;
+                }
+                let boundary_slot = epoch.saturating_mul(epoch_slots);
+                let emission = self.emission_schedule.epoch_emission(boundary_slot, supply);
+                for (address, stake) in self
+                    .consensus
+                    .validator_addresses_and_stakes_at_epoch(epoch)
+                {
+                    let share = mul_div(emission, stake, total_stake);
+                    if share > 0 {
+                        credits.push((address, share));
+                    }
+                }
+            }
+        }
+        self.ledger
+            .apply_account_credits(&mut overlay, &mut tree, &credits)?;
+        // A failed transaction has no debit in the ledger and therefore cannot
+        // fund a proposer reward, treasury credit, or burn. Successful
+        // transactions pay their signed flat fee and reserve their declared gas.
+        let (total_fees, gas_used) = transactions.iter().zip(&receipts).try_fold(
+            (0u128, 0u64),
+            |(fees, gas), (tx, receipt)| -> Result<_> {
+                if !matches!(receipt.status, TransactionStatus::Success) {
+                    return Ok((fees, gas));
+                }
+                Ok((
+                    fees.checked_add(tx.fee)
+                        .context("block fee total overflow")?,
+                    gas.checked_add(tx.gas_limit)
+                        .context("block gas total overflow")?,
+                ))
+            },
+        )?;
         let fee_result = fee_market.process_block(gas_used, total_fees);
         self.ledger.apply_fee_distribution(
             &mut overlay,
@@ -1097,11 +1165,19 @@ impl Node {
             fee_result.burned,
             fee_result.treasury_fee,
         )?;
+        let state_root = overlay.state_root;
+        for receipt in &mut receipts {
+            receipt.state_root = state_root;
+        }
+        let receipts_root = compute_receipts_root(&receipts);
         Ok(ExecutedBlock {
             receipts,
             overlay,
             tree,
             fee_market,
+            staking_state: branch_staking_state,
+            slash_events,
+            slashed_offenses: branch_slashed_offenses,
             state_root,
             receipts_root,
         })
@@ -1146,6 +1222,9 @@ impl Node {
                 tree: executed.tree,
                 receipts,
                 fee_market: executed.fee_market,
+                staking_state: executed.staking_state,
+                slash_events: executed.slash_events,
+                slashed_offenses: executed.slashed_offenses,
             },
         );
     }
@@ -1248,6 +1327,40 @@ impl Node {
     }
 
     fn produce_block(&mut self, slot: Slot) -> Result<()> {
+        let evidence = self.next_slash_evidence();
+        self.produce_block_with_evidence(slot, &evidence)
+    }
+
+    fn next_slash_evidence(&self) -> Vec<SlashEvidence> {
+        let mut pending: Vec<_> = self
+            .pending_slash_evidence
+            .iter()
+            .filter(|(key, _)| !self.slashed_offenses.contains(key))
+            .map(|(key, evidence)| (*key, evidence.clone()))
+            .collect();
+        pending.sort_by_key(|((address, slot), _)| (address.as_bytes().to_vec(), *slot));
+        pending
+            .into_iter()
+            .take(MAX_PENDING_SLASH_EVIDENCE)
+            .map(|(_, evidence)| evidence)
+            .collect()
+    }
+
+    /// Propose a block carrying slash evidence. Evidence is applied only as
+    /// branch state and becomes canonical when the block finalizes.
+    pub fn propose_block_with_slash_evidence(
+        &mut self,
+        slot: Slot,
+        slash_evidence: Vec<SlashEvidence>,
+    ) -> Result<()> {
+        self.produce_block_with_evidence(slot, &slash_evidence)
+    }
+
+    fn produce_block_with_evidence(
+        &mut self,
+        slot: Slot,
+        slash_evidence: &[SlashEvidence],
+    ) -> Result<()> {
         let _span = tracing::info_span!("produce_block", slot).entered();
         let block_start = Instant::now();
 
@@ -1296,7 +1409,13 @@ impl Node {
         let timestamp = (unix_millis() / 1000).max(parent_timestamp);
         let context = BlockContext { slot, timestamp };
 
-        let executed = self.execute_on_parent(&parent_hash, &proposer, &transactions, context)?;
+        let executed = self.execute_on_parent(
+            &parent_hash,
+            &proposer,
+            &transactions,
+            slash_evidence,
+            context,
+        )?;
         let successful = executed
             .receipts
             .iter()
@@ -1309,6 +1428,7 @@ impl Node {
         block.header.transactions_root = compute_transactions_root(&block.transactions);
         block.header.receipts_root = executed.receipts_root;
         block.aggregated_vote = aggregated_vote;
+        block.slash_evidence = slash_evidence.to_vec();
 
         let block_hash = block.hash();
 
@@ -1414,7 +1534,7 @@ impl Node {
 
         // Use individual validator stake, NOT total_stake
         let voter_addr = validator_pubkey.to_address();
-        let my_stake = self.consensus.validator_stake(&voter_addr);
+        let my_stake = self.consensus.validator_stake_at_slot(&voter_addr, slot);
 
         let vote = Vote {
             slot,
@@ -1659,6 +1779,7 @@ impl Node {
             &parent_hash,
             &block.header.proposer,
             &block.transactions,
+            &block.slash_evidence,
             context,
         )?;
         if executed.receipts_root != block.header.receipts_root {
@@ -1761,7 +1882,8 @@ impl Node {
                 .get_bls_pubkey(&addr)
                 .ok_or_else(|| anyhow::anyhow!("no BLS pubkey registered for signer {:?}", addr))?;
             bls_pubkeys.push(bls_pk);
-            voted_stake = voted_stake.saturating_add(self.consensus.validator_stake(&addr));
+            voted_stake = voted_stake
+                .saturating_add(self.consensus.validator_stake_at_slot(&addr, agg_vote.slot));
         }
         let agg_pk = aether_crypto_bls::aggregate_public_keys(&bls_pubkeys)
             .map_err(|e| anyhow::anyhow!("failed to aggregate signer pubkeys: {e}"))?;
@@ -1774,7 +1896,7 @@ impl Node {
         if !valid {
             bail!("invalid BLS aggregate signature in block");
         }
-        let total_stake = self.consensus.total_stake();
+        let total_stake = self.consensus.total_stake_at_slot(agg_vote.slot);
         if total_stake > 0 && !aether_consensus::has_quorum(voted_stake, total_stake) {
             bail!(
                 "insufficient quorum: voted stake {} < required 2/3 of {}",
@@ -1887,57 +2009,85 @@ impl Node {
         .entered();
         let validator_address = vote.validator.to_address();
 
-        // Check for double-signing before accepting the vote
-        if let Some(proof) = self.slashing_detector.record_vote(
-            validator_address,
-            vote.validator.clone(),
-            vote.slot,
-            vote.block_hash,
-            vote.signature.clone(),
-        ) {
-            // Double-sign detected — apply slash to both consensus vote weights AND
-            // staking state (the authoritative bond accounting). Use a dedup set so
-            // block-evidence processing cannot slash the same (validator, slot) twice.
-            let offense_key = (proof.validator, vote.slot);
-            if self.slashed_offenses.insert(offense_key) {
-                // Update consensus vote weight (affects current round immediately).
-                self.consensus.slash_validator(&proof.validator, 500);
+        // Record only votes signed by the BLS key registered to this
+        // validator. This keeps local evidence generation aligned with the
+        // proof verifier and prevents unauthenticated votes entering it.
+        let mut vote_message = Vec::with_capacity(40);
+        vote_message.extend_from_slice(vote.block_hash.as_bytes());
+        vote_message.extend_from_slice(&vote.slot.to_le_bytes());
+        let registered_bls_key = self.consensus.get_bls_pubkey(&validator_address);
+        let valid_bls_vote = registered_bls_key.as_ref().is_some_and(|key| {
+            matches!(
+                aether_crypto_bls::keypair::verify(key, &vote_message, vote.signature.as_bytes(),),
+                Ok(true)
+            )
+        });
+        let proof = if valid_bls_vote {
+            self.slashing_detector.record_vote(
+                validator_address,
+                PublicKey::from_bytes(registered_bls_key.expect("checked above")),
+                vote.slot,
+                vote.block_hash,
+                vote.signature.clone(),
+            )
+        } else {
+            None
+        };
 
-                // Update staking bond accounting so the slash is reflected in
-                // validator stake queries and reward calculations.
+        if let Some(proof) = proof {
+            // This local observation may not yet be part of a finalized block.
+            // Keep the live diagnostic weight responsive, but leave economic
+            // staking state and canonical offense dedup branch-local until the
+            // proof is included in a finalized block.
+            let offense_key = (proof.validator, vote.slot);
+            if self.detected_offenses.insert(offense_key) {
                 let rate_bps = slash_verify::slash_rate_bps(&proof.proof_type);
-                match self
-                    .staking_state
-                    .slash(proof.validator, u128::from(rate_bps), vote.slot)
-                {
-                    Ok(staking_slashed) => {
-                        tracing::warn!(
-                            validator = ?proof.validator,
-                            slot = vote.slot,
-                            consensus_rate_bps = 500,
-                            staking_slashed,
-                            "Double-sign detected — slashed consensus vote weight and staking bond"
-                        );
-                        if let Err(e) = self.persist_staking_state() {
-                            tracing::error!(
-                                err = %e,
-                                "Failed to persist staking state after vote-time slash"
-                            );
-                        }
-                    }
-                    Err(e) => tracing::warn!(
-                        validator = ?proof.validator,
-                        slot = vote.slot,
-                        err = %e,
-                        "Double-sign detected — consensus vote weight slashed but staking slash failed"
-                    ),
-                }
+                self.consensus
+                    .slash_validator(&proof.validator, u128::from(rate_bps));
+                tracing::warn!(
+                    validator = ?proof.validator,
+                    slot = vote.slot,
+                    rate_bps,
+                    "Double-sign detected locally; economic slash awaits finalized block evidence"
+                );
             } else {
                 tracing::debug!(
                     validator = ?proof.validator,
                     slot = vote.slot,
                     "Double-sign already slashed for this (validator, slot) — skipping duplicate"
                 );
+            }
+
+            let offense_key = (proof.validator, proof.vote1.slot);
+            if !self.slashed_offenses.contains(&offense_key)
+                && !self.pending_slash_evidence.contains_key(&offense_key)
+                && self.pending_slash_evidence.len() < MAX_PENDING_SLASH_EVIDENCE
+            {
+                let to_evidence_vote = |vote: &slash_verify::Vote| aether_types::SlashVote {
+                    slot: vote.slot,
+                    block_hash: vote.block_hash,
+                    validator: vote.validator,
+                    validator_pubkey: vote.validator_pubkey.clone(),
+                    signature: vote.signature.clone(),
+                };
+                let mut queued_evidence = self.pending_slash_evidence.clone();
+                queued_evidence.insert(
+                    offense_key,
+                    SlashEvidence {
+                        validator: proof.validator,
+                        slash_rate_bps: slash_verify::slash_rate_bps(&proof.proof_type),
+                        reason: "double_sign".to_string(),
+                        vote1: Some(to_evidence_vote(&proof.vote1)),
+                        vote2: Some(to_evidence_vote(&proof.vote2)),
+                        evidence_type: Some(aether_types::SlashEvidenceType::DoubleSign),
+                    },
+                );
+                self.ledger.storage().put(
+                    CF_METADATA,
+                    META_PENDING_SLASH_EVIDENCE,
+                    &bincode::serialize(&queued_evidence)?,
+                )?;
+                self.pending_slash_evidence = queued_evidence;
             }
         }
 
@@ -2138,7 +2288,7 @@ impl Node {
     /// Write one finalized block (state delta, block, receipts, fee market,
     /// QC, staking/slashing effects) to storage in a single atomic batch.
     fn commit_finalized(&mut self, block_hash: H256) -> Result<()> {
-        let Some(pb) = self.pending.remove(&block_hash) else {
+        let Some(pb) = self.pending.get(&block_hash).cloned() else {
             return Ok(());
         };
         let slot = pb.block.header.slot;
@@ -2162,11 +2312,30 @@ impl Node {
         if let Some(ref qc) = qc {
             extra.put(CF_METADATA, META_TIP_QC.to_vec(), bincode::serialize(qc)?);
         }
-        self.apply_slash_evidence(&pb.block);
-        // Staking state (slashes, unbonding) is persisted with the block.
-        self.persist_staking_state_to_batch(&mut extra)?;
+        // Persist the exact branch state whose unbonding returns are present in
+        // the finalized account overlay.
+        Self::persist_staking_value_to_batch(&pb.staking_state, &mut extra)?;
+        extra.put(
+            CF_METADATA,
+            META_SLASHED_OFFENSES.to_vec(),
+            bincode::serialize(&pb.slashed_offenses)?,
+        );
+        let mut remaining_slash_evidence = self.pending_slash_evidence.clone();
+        remaining_slash_evidence.retain(|offense, _| !pb.slashed_offenses.contains(offense));
+        extra.put(
+            CF_METADATA,
+            META_PENDING_SLASH_EVIDENCE.to_vec(),
+            bincode::serialize(&remaining_slash_evidence)?,
+        );
 
         self.ledger.commit_pending(&pb.overlay, &pb.tree, extra)?;
+        self.pending.remove(&block_hash);
+        self.slashed_offenses = pb.slashed_offenses.clone();
+        self.pending_slash_evidence = remaining_slash_evidence;
+        for (address, _, rate_bps) in &pb.slash_events {
+            self.consensus.slash_validator(address, *rate_bps);
+        }
+        self.staking_state = pb.staking_state.clone();
         STORAGE_METRICS.blocks_persisted.inc();
 
         // Children now read this block's effects from storage.
@@ -2272,9 +2441,17 @@ impl Node {
         // removes them), so they are simply eligible again.
     }
 
-    /// Apply slash evidence carried by a finalized block.
-    fn apply_slash_evidence(&mut self, block: &Block) {
-        for evidence in &block.slash_evidence {
+    /// Apply slash evidence to the branch state while executing its block.
+    /// Consensus weight changes are deferred until the block finalizes.
+    fn apply_slash_evidence_to_state(
+        &self,
+        evidence_list: &[SlashEvidence],
+        block_slot: Slot,
+        staking_state: &mut StakingState,
+        slashed_offenses: &mut HashSet<(Address, Slot)>,
+    ) -> Vec<(Address, Slot, u128)> {
+        let mut events = Vec::new();
+        for evidence in evidence_list {
             let (v1, v2, etype) = match (&evidence.vote1, &evidence.vote2, &evidence.evidence_type)
             {
                 (Some(v1), Some(v2), Some(etype)) => (v1, v2, etype),
@@ -2311,6 +2488,27 @@ impl Node {
                 proof_type: proof_type.clone(),
             };
 
+            // BLS signatures prove that the supplied key signed the votes,
+            // but the key must also be the one registered to this validator
+            // address or an attacker could slash a victim with their own key.
+            let Some(registered_bls_key) = self.consensus.get_bls_pubkey(&evidence.validator)
+            else {
+                tracing::warn!(
+                    validator = ?evidence.validator,
+                    "Slash rejected — validator has no registered BLS key"
+                );
+                continue;
+            };
+            if v1.validator_pubkey.as_bytes() != registered_bls_key.as_slice()
+                || v2.validator_pubkey.as_bytes() != registered_bls_key.as_slice()
+            {
+                tracing::warn!(
+                    validator = ?evidence.validator,
+                    "Slash rejected — proof BLS key does not match registered validator key"
+                );
+                continue;
+            }
+
             if let Err(e) = slash_verify::verify_slash_proof(&proof) {
                 tracing::warn!(
                     validator = ?evidence.validator,
@@ -2324,7 +2522,7 @@ impl Node {
             // Dedup: skip if already slashed by vote-time detection for this
             // (validator, slot) pair, preventing double-slash of the same offense.
             let offense_key = (evidence.validator, v1.slot);
-            if !self.slashed_offenses.insert(offense_key) {
+            if slashed_offenses.contains(&offense_key) {
                 tracing::debug!(
                     validator = ?evidence.validator,
                     slot = v1.slot,
@@ -2335,20 +2533,18 @@ impl Node {
             }
 
             let rate_bps = slash_verify::slash_rate_bps(&proof.proof_type);
-            self.consensus
-                .slash_validator(&evidence.validator, u128::from(rate_bps));
-            match self.staking_state.slash(
-                evidence.validator,
-                u128::from(rate_bps),
-                block.header.slot,
-            ) {
-                Ok(slashed) => tracing::warn!(
-                    validator = ?evidence.validator,
-                    rate_bps,
-                    slashed,
-                    reason = %evidence.reason,
-                    "Slash applied (block evidence)"
-                ),
+            match staking_state.slash(evidence.validator, u128::from(rate_bps), block_slot) {
+                Ok(slashed) => {
+                    slashed_offenses.insert(offense_key);
+                    events.push((evidence.validator, offense_key.1, u128::from(rate_bps)));
+                    tracing::warn!(
+                        validator = ?evidence.validator,
+                        rate_bps,
+                        slashed,
+                        reason = %evidence.reason,
+                        "Slash applied in speculative block state"
+                    )
+                }
                 Err(e) => tracing::warn!(
                     validator = ?evidence.validator,
                     reason = %evidence.reason,
@@ -2357,6 +2553,7 @@ impl Node {
                 ),
             }
         }
+        events
     }
 
     pub fn stop(&mut self) {
@@ -2404,6 +2601,10 @@ impl Node {
         self.last_poh_metrics.as_ref()
     }
 
+    pub fn chain_config(&self) -> &ChainConfig {
+        &self.chain_config
+    }
+
     pub fn current_slot(&self) -> Slot {
         self.consensus.current_slot()
     }
@@ -2448,6 +2649,7 @@ impl Node {
         }
         self.ledger.seed_accounts(accounts)?;
         let mut batch = StorageBatch::new();
+        Self::persist_staking_value_to_batch(&self.staking_state, &mut batch)?;
         batch.put(CF_METADATA, b"genesis_applied".to_vec(), vec![1]);
         batch.put(
             CF_METADATA,
@@ -2668,19 +2870,14 @@ impl Node {
         &self.staking_state
     }
 
-    /// Serialize current staking state into a batch for atomic persistence.
-    fn persist_staking_state_to_batch(&self, batch: &mut StorageBatch) -> Result<()> {
+    fn persist_staking_value_to_batch(
+        staking_state: &StakingState,
+        batch: &mut StorageBatch,
+    ) -> Result<()> {
         let bytes =
-            bincode::serialize(&self.staking_state).context("failed to serialize staking state")?;
+            bincode::serialize(staking_state).context("failed to serialize staking state")?;
         batch.put(CF_STAKING, b"staking_state".to_vec(), bytes);
         Ok(())
-    }
-
-    /// Persist staking state to disk immediately (standalone write).
-    fn persist_staking_state(&self) -> Result<()> {
-        let mut batch = StorageBatch::new();
-        self.persist_staking_state_to_batch(&mut batch)?;
-        self.ledger.write_batch(batch)
     }
 }
 

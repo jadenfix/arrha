@@ -584,81 +584,6 @@ impl Ledger {
         Ok(())
     }
 
-    /// Fold proposer reward and burn accounting into an existing write batch,
-    /// making fee distribution atomic with the overlay commit.
-    ///
-    /// Must be called AFTER `prepare_overlay_batch` (so the in-memory Merkle tree
-    /// already reflects the overlay state) and BEFORE the batch is written to disk.
-    ///
-    /// Uses `overlay` to read the proposer's post-transaction balance in case the
-    /// proposer also submitted transactions in this block.
-    pub fn fold_fee_distribution_into_batch(
-        &mut self,
-        batch: &mut StorageBatch,
-        overlay: &PendingOverlay,
-        proposer: &Address,
-        proposer_reward: u128,
-        burned: u128,
-        treasury_fee: u128,
-    ) -> Result<()> {
-        if proposer_reward > 0 {
-            // Read proposer account from overlay first (in case proposer submitted txs),
-            // falling back to DB if not present in the overlay.
-            let mut account = self.get_account_from_overlay(overlay, proposer)?;
-            account.balance = account
-                .balance
-                .checked_add(proposer_reward)
-                .ok_or_else(|| anyhow!("proposer balance overflow"))?;
-            self.update_account_in_batch(batch, account.clone())?;
-            // Overwrites the state_root entry already in the batch with the updated root.
-            self.update_state_root_incremental(&account, None, Some(batch))?;
-        }
-
-        if burned > 0 {
-            let current = self
-                .storage
-                .get(CF_METADATA, b"total_burned")?
-                .map(|bytes| {
-                    let mut arr = [0u8; 16];
-                    arr.copy_from_slice(&bytes[..16.min(bytes.len())]);
-                    u128::from_le_bytes(arr)
-                })
-                .unwrap_or(0);
-            let new_total = current
-                .checked_add(burned)
-                .ok_or_else(|| anyhow!("total_burned overflow in batch"))?;
-            batch.put(
-                CF_METADATA,
-                b"total_burned".to_vec(),
-                new_total.to_le_bytes().to_vec(),
-            );
-        }
-
-        // Accumulate treasury fees in metadata. These are held in reserve
-        // until the governance module is wired in and can claim them.
-        if treasury_fee > 0 {
-            let current = self
-                .storage
-                .get(CF_METADATA, b"total_treasury_fees")?
-                .map(|bytes| {
-                    let mut arr = [0u8; 16];
-                    arr.copy_from_slice(&bytes[..16.min(bytes.len())]);
-                    u128::from_le_bytes(arr)
-                })
-                .unwrap_or(0);
-            let new_total = current
-                .checked_add(treasury_fee)
-                .ok_or_else(|| anyhow!("total_treasury_fees overflow in batch"))?;
-            batch.put(
-                CF_METADATA,
-                b"total_treasury_fees".to_vec(),
-                new_total.to_le_bytes().to_vec(),
-            );
-        }
-
-        Ok(())
-    }
-
     /// Get the total amount of fees burned since genesis.
     pub fn total_burned(&self) -> u128 {
         self.storage
@@ -906,6 +831,36 @@ impl Ledger {
                 .checked_add(amount)
                 .ok_or_else(|| anyhow!("fee accounting overflow"))?;
             overlay.put(CF_METADATA, key.to_vec(), new_total.to_le_bytes().to_vec());
+        }
+        tree.recompute();
+        overlay.state_root = tree.root();
+        Ok(())
+    }
+
+    /// Apply deterministic protocol credits inside a block's speculative
+    /// overlay. Credits become canonical only if the containing block finalizes.
+    pub fn apply_account_credits(
+        &self,
+        overlay: &mut PendingOverlay,
+        tree: &mut SparseMerkleTree,
+        credits: &[(Address, u128)],
+    ) -> Result<()> {
+        for (address, amount) in credits {
+            if *amount == 0 {
+                continue;
+            }
+            let mut account = self.get_account_from_overlay(overlay, address)?;
+            account.balance = account
+                .balance
+                .checked_add(*amount)
+                .ok_or_else(|| anyhow!("account credit overflow for {address:?}"))?;
+            overlay.put(
+                CF_ACCOUNTS,
+                address.as_bytes().to_vec(),
+                bincode::serialize(&account)?,
+            );
+            overlay.changed_accounts.push(*address);
+            tree.set_leaf(*address, self.hash_account(&account));
         }
         tree.recompute();
         overlay.state_root = tree.root();

@@ -6,8 +6,8 @@
 // ============================================================================
 
 use aether_node::{
-    create_hybrid_consensus_with_all_keys, validator_info_from_keypair, Node, OutboundMessage,
-    ValidatorKeypair,
+    create_hybrid_consensus_with_all_keys, unix_millis, validator_info_from_keypair, Node,
+    OutboundMessage, ValidatorKeypair,
 };
 use aether_types::{
     Address, Block, ChainConfig, PublicKey, Signature, Transaction, ValidatorInfo, Vote, H256,
@@ -20,6 +20,10 @@ use tempfile::TempDir;
 struct TestNetwork {
     nodes: Vec<Node>,
     _temp_dirs: Vec<TempDir>,
+    chain_config: Arc<ChainConfig>,
+    consensus_epoch_length: u64,
+    consensus_tau: f64,
+    validator_count: usize,
     pending_blocks: Vec<Block>,
     pending_votes: Vec<Vote>,
     pending_txs: Vec<Transaction>,
@@ -31,6 +35,23 @@ impl TestNetwork {
     }
 
     fn new_with_config(num_validators: usize, chain_config: Arc<ChainConfig>) -> Self {
+        Self::new_with_consensus_epoch_length(num_validators, chain_config, 100)
+    }
+
+    fn new_with_consensus_epoch_length(
+        num_validators: usize,
+        chain_config: Arc<ChainConfig>,
+        consensus_epoch_length: u64,
+    ) -> Self {
+        Self::new_with_consensus_params(num_validators, chain_config, consensus_epoch_length, 0.8)
+    }
+
+    fn new_with_consensus_params(
+        num_validators: usize,
+        chain_config: Arc<ChainConfig>,
+        consensus_epoch_length: u64,
+        consensus_tau: f64,
+    ) -> Self {
         let keypairs: Vec<ValidatorKeypair> = (0..num_validators)
             .map(|_| ValidatorKeypair::generate())
             .collect();
@@ -66,14 +87,17 @@ impl TestNetwork {
 
         for keypair in keypairs {
             let temp_dir = TempDir::new().unwrap();
+            keypair
+                .save_to_file(&temp_dir.path().join("validator-key.json"))
+                .expect("save E2E validator key for restart journey");
             let consensus = Box::new(
                 create_hybrid_consensus_with_all_keys(
                     validator_infos.clone(),
                     vrf_pubkeys.clone(),
                     bls_pubkeys.clone(),
                     Some(&keypair),
-                    0.8, // tau: 80% leader rate
-                    100, // epoch length
+                    consensus_tau,
+                    consensus_epoch_length,
                 )
                 .expect("create consensus"),
             );
@@ -99,10 +123,122 @@ impl TestNetwork {
         TestNetwork {
             nodes,
             _temp_dirs: temp_dirs,
+            chain_config,
+            consensus_epoch_length,
+            consensus_tau,
+            validator_count: num_validators,
             pending_blocks: Vec::new(),
             pending_votes: Vec::new(),
             pending_txs: Vec::new(),
         }
+    }
+
+    fn restart_node(&mut self, index: usize) {
+        let mut keypairs: Vec<ValidatorKeypair> = self
+            ._temp_dirs
+            .iter()
+            .take(self.validator_count)
+            .map(|dir| {
+                ValidatorKeypair::load_from_file(&dir.path().join("validator-key.json"))
+                    .expect("reload E2E validator key")
+            })
+            .collect();
+        let validator_infos: Vec<ValidatorInfo> = keypairs
+            .iter()
+            .map(|keypair| validator_info_from_keypair(keypair, 1_000))
+            .collect();
+        let vrf_pubkeys: Vec<(Address, [u8; 32])> = keypairs
+            .iter()
+            .map(|keypair| (keypair.address(), *keypair.vrf.public_key()))
+            .collect();
+        let bls_pubkeys: Vec<(Address, Vec<u8>, Vec<u8>)> = keypairs
+            .iter()
+            .map(|keypair| {
+                (
+                    keypair.address(),
+                    keypair.bls.public_key(),
+                    keypair.bls.proof_of_possession(),
+                )
+            })
+            .collect();
+        let consensus = Box::new(
+            create_hybrid_consensus_with_all_keys(
+                validator_infos,
+                vrf_pubkeys,
+                bls_pubkeys,
+                Some(&keypairs[index]),
+                self.consensus_tau,
+                self.consensus_epoch_length,
+            )
+            .expect("recreate consensus after E2E restart"),
+        );
+        drop(self.nodes.remove(index));
+        let keypair = keypairs.remove(index);
+        let node = Node::new(
+            self._temp_dirs[index].path(),
+            consensus,
+            Some(keypair.ed25519),
+            Some(keypair.bls),
+            self.chain_config.clone(),
+        )
+        .expect("restart node against same E2E database");
+        self.nodes.insert(index, node);
+    }
+
+    fn add_observer(&mut self) {
+        let keypairs: Vec<ValidatorKeypair> = self
+            ._temp_dirs
+            .iter()
+            .take(self.validator_count)
+            .map(|dir| {
+                ValidatorKeypair::load_from_file(&dir.path().join("validator-key.json"))
+                    .expect("reload E2E validator key for observer")
+            })
+            .collect();
+        let validator_infos: Vec<ValidatorInfo> = keypairs
+            .iter()
+            .map(|keypair| validator_info_from_keypair(keypair, 1_000))
+            .collect();
+        let vrf_pubkeys: Vec<(Address, [u8; 32])> = keypairs
+            .iter()
+            .map(|keypair| (keypair.address(), *keypair.vrf.public_key()))
+            .collect();
+        let bls_pubkeys: Vec<(Address, Vec<u8>, Vec<u8>)> = keypairs
+            .iter()
+            .map(|keypair| {
+                (
+                    keypair.address(),
+                    keypair.bls.public_key(),
+                    keypair.bls.proof_of_possession(),
+                )
+            })
+            .collect();
+        let consensus = Box::new(
+            create_hybrid_consensus_with_all_keys(
+                validator_infos,
+                vrf_pubkeys,
+                bls_pubkeys,
+                None,
+                self.consensus_tau,
+                self.consensus_epoch_length,
+            )
+            .expect("create observer consensus"),
+        );
+        let temp_dir = TempDir::new().unwrap();
+        let mut node = Node::new(
+            temp_dir.path(),
+            consensus,
+            None,
+            None,
+            self.chain_config.clone(),
+        )
+        .expect("create observer node");
+        for keypair in &keypairs {
+            node.seed_account(&keypair.address(), 1_000_000_000)
+                .unwrap();
+        }
+        self.nodes.push(node);
+        self._temp_dirs.push(temp_dir);
     }
 
     /// Deliver all pending messages to all nodes, then tick each node.
@@ -593,6 +729,125 @@ fn test_e2e_fee_market_no_double_count() {
     );
 }
 
+// A signed transaction that fails execution must not fund block fees, and the
+// finalized header root must commit to the actual post-fee ledger state.
+#[test]
+fn test_failed_transaction_cannot_mint_fees_or_escape_header_state_root() {
+    let mut network = TestNetwork::new(1);
+    let base_fee = network.nodes[0].base_fee();
+
+    let sender_key = aether_crypto_primitives::Keypair::generate();
+    let sender_pubkey = PublicKey::from_bytes(sender_key.public_key());
+    let sender = sender_pubkey.to_address();
+    for node in &mut network.nodes {
+        node.seed_account(&sender, 1).unwrap();
+    }
+
+    let gas_limit = 21_000;
+    let fee = base_fee * u128::from(gas_limit) + 10_000_000;
+    let mut tx = Transaction {
+        nonce: 0,
+        chain_id: 900,
+        sender,
+        sender_pubkey,
+        inputs: vec![],
+        outputs: vec![],
+        reads: HashSet::new(),
+        writes: HashSet::new(),
+        program_id: None,
+        data: vec![],
+        gas_limit,
+        fee,
+        signature: Signature::from_bytes(vec![]),
+    };
+    tx.signature = Signature::from_bytes(sender_key.sign(tx.hash().as_bytes()));
+
+    let funded_key = aether_crypto_primitives::Keypair::generate();
+    let funded_pubkey = PublicKey::from_bytes(funded_key.public_key());
+    let funded_sender = funded_pubkey.to_address();
+    for node in &mut network.nodes {
+        node.seed_account(&funded_sender, 1_000_000_000).unwrap();
+    }
+    let mut funded_tx = Transaction {
+        nonce: 0,
+        chain_id: 900,
+        sender: funded_sender,
+        sender_pubkey: funded_pubkey,
+        inputs: vec![],
+        outputs: vec![],
+        reads: HashSet::new(),
+        writes: HashSet::new(),
+        program_id: None,
+        data: vec![],
+        gas_limit,
+        fee,
+        signature: Signature::from_bytes(vec![]),
+    };
+    funded_tx.signature = Signature::from_bytes(funded_key.sign(funded_tx.hash().as_bytes()));
+
+    let proposer = network.nodes[0].validator_address().unwrap();
+    assert_ne!(proposer, funded_sender);
+    let sender_before = network.nodes[0].get_account(sender).unwrap().unwrap();
+    let funded_before = network.nodes[0]
+        .get_account(funded_sender)
+        .unwrap()
+        .unwrap();
+    let proposer_before = network.nodes[0].get_account(proposer).unwrap().unwrap();
+    let tx_hash = tx.hash();
+    let funded_hash = funded_tx.hash();
+    network.nodes[0].submit_transaction(tx).unwrap();
+    network.nodes[0].submit_transaction(funded_tx).unwrap();
+
+    network.run_slots(10);
+
+    let receipt = network.nodes[0]
+        .get_transaction_receipt(tx_hash)
+        .expect("the transaction should be included in a finalized block");
+    let funded_receipt = network.nodes[0]
+        .get_transaction_receipt(funded_hash)
+        .expect("the funded transaction should be included in a finalized block");
+    assert!(
+        matches!(
+            receipt.status,
+            aether_types::TransactionStatus::Failed { .. }
+        ),
+        "the seeded balance cannot cover the transaction fee"
+    );
+    assert!(matches!(
+        funded_receipt.status,
+        aether_types::TransactionStatus::Success
+    ));
+    assert_eq!(receipt.block_hash, funded_receipt.block_hash);
+    let block = network.nodes[0]
+        .get_block_by_hash(receipt.block_hash)
+        .expect("finalized receipt block should be available");
+    let sender_after = network.nodes[0].get_account(sender).unwrap().unwrap();
+    let funded_after = network.nodes[0]
+        .get_account(funded_sender)
+        .unwrap()
+        .unwrap();
+    let proposer_after = network.nodes[0].get_account(proposer).unwrap().unwrap();
+    let finalized_root = network.nodes[0].get_state_root();
+
+    assert_eq!(
+        (sender_after.balance, sender_after.nonce),
+        (sender_before.balance, sender_before.nonce),
+        "failed tx must not debit sender or consume its nonce"
+    );
+    let expected_valid_tip = fee - base_fee * u128::from(gas_limit);
+    let expected_proposer_reward = expected_valid_tip * 60 / 100;
+    assert_eq!(
+        proposer_after.balance,
+        proposer_before.balance + expected_proposer_reward,
+        "only successful tx fees may fund a proposer reward"
+    );
+    assert_eq!(funded_after.nonce, funded_before.nonce + 1);
+    assert_eq!(
+        block.header.state_root, finalized_root,
+        "header root must include the finalized fee distribution"
+    );
+}
+
 // ============================================================================
 // Test 10: Outbound buffer is bounded
 // ============================================================================
@@ -655,6 +910,203 @@ fn test_epoch_pruning_removes_old_data() {
 }
 
 // ============================================================================
+#[test]
+fn test_epoch_boundary_restart_does_not_repeat_credits() {
+    let mut config = ChainConfig::devnet();
+    config.chain.epoch_slots = 5;
+    let config = Arc::new(config);
+    let mut network = TestNetwork::new_with_consensus_params(1, config, 5, 1.0);
+    network.add_observer();
+    let chain_identity = H256::from_slice(&[0x41; 32]).unwrap();
+    for node in &mut network.nodes {
+        node.bind_chain_identity(chain_identity).unwrap();
+    }
+    network.run_slots(5);
+
+    // The observer is caught up through slot 4. Deliver the final queued slot-4
+    // traffic before advancing only the producer across the slot-5 boundary.
+    for vote in network.pending_votes.drain(..) {
+        network.nodes[1].on_vote_received(vote).unwrap();
+    }
+    for block in network.pending_blocks.drain(..) {
+        network.nodes[1].on_block_received(block).unwrap();
+    }
+
+    // Produce the first boundary block, then deliver it before the observer
+    // processes its own slot-5 tick. Its branch execution must include exactly
+    // the same epoch transition as the producer.
+    network.nodes[0].tick().unwrap();
+    let mut boundary_block = None;
+    let mut boundary_vote = None;
+    for message in network.nodes[0].drain_outbound() {
+        match message {
+            OutboundMessage::BroadcastBlock(block) if block.header.slot == 5 => {
+                boundary_block = Some(block);
+            }
+            OutboundMessage::BroadcastVote(vote) if vote.slot == 5 => {
+                boundary_vote = Some(vote);
+            }
+            _ => {}
+        }
+    }
+    let boundary_block = boundary_block.expect("producer should create the epoch-boundary block");
+    network.nodes[1]
+        .on_block_received(boundary_block)
+        .expect("peer must execute boundary rewards from the block transition");
+    network.nodes[1]
+        .on_vote_received(boundary_vote.expect("producer should vote for its boundary block"))
+        .unwrap();
+
+    let validator = network.nodes[0].validator_address().unwrap();
+    let balance_before_restart = network.nodes[0]
+        .get_account(validator)
+        .unwrap()
+        .unwrap()
+        .balance;
+    assert!(
+        balance_before_restart > 1_000_000_000,
+        "the epoch should have credited a validator before restart"
+    );
+    assert_eq!(
+        network.nodes[1]
+            .get_account(validator)
+            .unwrap()
+            .unwrap()
+            .balance,
+        balance_before_restart
+    );
+    assert_eq!(
+        network.nodes[0].get_state_root(),
+        network.nodes[1].get_state_root(),
+        "continuous peers should agree after the epoch boundary"
+    );
+
+    // Reopen the same RocksDB while the observer remains live. Restart must
+    // preserve the already-finalized boundary transition without crediting it
+    // a second time.
+    network.restart_node(0);
+    assert!(network.nodes[0]
+        .bind_chain_identity(H256::from_slice(&[0x42; 32]).unwrap())
+        .is_err());
+    network.nodes[0].tick().unwrap();
+
+    assert_eq!(
+        network.nodes[0]
+            .get_account(validator)
+            .unwrap()
+            .unwrap()
+            .balance,
+        balance_before_restart,
+        "restart must not credit the completed epoch twice"
+    );
+    assert_eq!(
+        network.nodes[0].get_state_root(),
+        network.nodes[1].get_state_root(),
+        "restarted validator must retain the continuous peer's finalized state"
+    );
+}
+
+#[test]
+fn test_block_skipping_two_epoch_boundaries_credits_each_once() {
+    let mut config = ChainConfig::devnet();
+    config.chain.epoch_slots = 5;
+    let slot_ms = config.chain.slot_ms;
+    let mut network = TestNetwork::new_with_consensus_params(1, Arc::new(config), 5, 1.0);
+    network.add_observer();
+    network.run_slots(5);
+
+    // Deliver slot 4 so both databases share the same parent, then advance
+    // directly from that parent to slot 10. The child block crosses epochs 1
+    // and 2 without any intervening block.
+    for vote in network.pending_votes.drain(..) {
+        network.nodes[1].on_vote_received(vote).unwrap();
+    }
+    for block in network.pending_blocks.drain(..) {
+        network.nodes[1].on_block_received(block).unwrap();
+    }
+    let genesis_time_ms = unix_millis().saturating_sub(10 * slot_ms);
+    for node in &mut network.nodes {
+        node.set_genesis_time_ms(genesis_time_ms);
+    }
+    let target_time_ms = genesis_time_ms.saturating_add(10 * slot_ms);
+    network.nodes[1].tick_wallclock(target_time_ms).unwrap();
+    network.nodes[0].tick_wallclock(target_time_ms).unwrap();
+
+    let mut block = None;
+    let mut vote = None;
+    for message in network.nodes[0].drain_outbound() {
+        match message {
+            OutboundMessage::BroadcastBlock(candidate) if candidate.header.slot == 10 => {
+                block = Some(candidate);
+            }
+            OutboundMessage::BroadcastVote(candidate) if candidate.slot == 10 => {
+                vote = Some(candidate);
+            }
+            _ => {}
+        }
+    }
+    let block = block.expect("producer should create a slot-10 block");
+    let parent = network.nodes[0]
+        .get_block_by_hash(block.header.parent_hash)
+        .expect("slot-10 block parent should be known");
+    assert_eq!(parent.header.slot, 4, "the block should skip epoch 1 and 2");
+    network.nodes[1]
+        .on_block_received(block.clone())
+        .expect("observer should execute both skipped epoch transitions");
+    let vote = vote.unwrap_or_else(|| {
+        // The first wall-clock tick after a restart sets the anti-double-vote
+        // floor at its target slot. Construct the validator's BLS vote for
+        // this block so the observer can still exercise QC delivery without
+        // advancing through intermediate slots.
+        let key = ValidatorKeypair::load_from_file(
+            &network._temp_dirs[0].path().join("validator-key.json"),
+        )
+        .unwrap();
+        let mut message = Vec::with_capacity(40);
+        message.extend_from_slice(block.hash().as_bytes());
+        message.extend_from_slice(&block.header.slot.to_le_bytes());
+        Vote {
+            slot: block.header.slot,
+            block_hash: block.hash(),
+            validator: key.public_key(),
+            signature: Signature::from_bytes(key.bls.sign(&message)),
+            stake: 1_000,
+        }
+    });
+    network.nodes[0].on_vote_received(vote.clone()).unwrap();
+    network.nodes[1].on_vote_received(vote).unwrap();
+    // Extend the certified block enough to finalize it, then inspect persisted
+    // balances and roots on both peers.
+    network.run_slots(4);
+
+    let validator = network.nodes[0].validator_address().unwrap();
+    let credited = network.nodes[0]
+        .get_account(validator)
+        .unwrap()
+        .unwrap()
+        .balance;
+    assert!(
+        credited > 1_000_000_000,
+        "both epoch emissions should be credited"
+    );
+    assert_eq!(
+        network.nodes[1]
+            .get_account(validator)
+            .unwrap()
+            .unwrap()
+            .balance,
+        credited
+    );
+    let root = network.nodes[0].get_state_root();
+    assert_eq!(root, network.nodes[1].get_state_root());
+    network.nodes[1].on_block_received(block).unwrap();
+    assert_eq!(
+        root,
+        network.nodes[1].get_state_root(),
+        "replay cannot re-credit epochs"
+    );
+}
+
 // Test 12: Network partition tolerance — safety and recovery
 // ============================================================================
 // Validates the core BFT safety property: when 4 validators are split into

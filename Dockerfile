@@ -2,8 +2,8 @@
 # Uses cargo-chef for dependency caching so code changes don't rebuild all deps.
 
 # ---- Chef: prepare dependency recipe ----
-FROM rust:1.90-slim AS chef
-RUN cargo install cargo-chef --locked
+FROM rust:1.90-slim-bookworm AS chef
+RUN cargo install cargo-chef --version 0.1.73 --locked
 WORKDIR /build
 
 # ---- Planner: extract dependency recipe from source ----
@@ -32,7 +32,7 @@ RUN cargo chef cook --release --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY ai-mesh ./ai-mesh
-RUN cargo build --release --bin aether-node --bin genesis-ceremony
+RUN cargo build --release --bin aether-node --bin genesis-ceremony --bin aetherctl
 
 # ---- Runtime: minimal image ----
 FROM debian:bookworm-slim
@@ -40,6 +40,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Run as non-root for security
@@ -51,19 +52,22 @@ WORKDIR /app
 # Copy binaries
 COPY --from=builder /build/target/release/aether-node /usr/local/bin/
 COPY --from=builder /build/target/release/genesis-ceremony /usr/local/bin/
+COPY --from=builder /build/target/release/aetherctl /usr/local/bin/
 
 # Copy config and scripts
 COPY config/genesis.toml /app/config/
 COPY scripts/docker-entrypoint.sh /app/scripts/
-RUN chmod +x /app/scripts/docker-entrypoint.sh
+COPY scripts/container-e2e.py /app/scripts/
+RUN chmod +x /app/scripts/docker-entrypoint.sh /app/scripts/container-e2e.py
 
 # Create data directory owned by non-root user
-RUN mkdir -p /app/data && chown -R aether:aether /app/data
+RUN mkdir -p /app/data/genesis /app/data/validator-1 /app/data/validator-2 \
+    /app/data/validator-3 /app/data/validator-4 && chown -R aether:aether /app/data
 
 EXPOSE 8545 9000
 
-ENV AETHER_CONFIG_PATH=/app/config/genesis.toml
-ENV AETHER_NODE_DB_PATH=/app/data
+ENV AETHER_NODE_DB_PATH=/app/data/validator-1
+ENV AETHER_RPC_BIND_IP=0.0.0.0
 
 # Health check via the /health HTTP endpoint
 HEALTHCHECK --interval=10s --timeout=3s --start-period=15s --retries=3 \

@@ -6,7 +6,8 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "dev": "vite --host 127.0.0.1 --port 3000 --strictPort",
+    "build": "tsc -p tsconfig.json --noEmit && vite build"
   },
   "dependencies": {
     "@aether/sdk": "file:../../sdks/typescript",

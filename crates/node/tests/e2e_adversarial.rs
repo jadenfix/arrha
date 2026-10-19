@@ -180,7 +180,7 @@ fn test_forged_block_rejected() {
     // Create a forged block with fabricated VRF proof
     let forged_block = Block {
         header: BlockHeader {
-            version: 1,
+            version: aether_types::PROTOCOL_VERSION,
             slot: 10,
             parent_hash: H256::zero(),
             state_root: H256::zero(),
@@ -793,19 +793,7 @@ fn test_slash_evidence_reduces_validator_stake() {
     let mut network = TestNetwork::new(1);
 
     let validator_addr = network._keypairs_cache[0];
-    let initial_stake: u128 = 1_000_000_000; // 1 000 SWR (above MIN_STAKE = 100 SWR)
-
-    // Register the validator in the node's staking state.
-    network.nodes[0]
-        .staking_state_mut()
-        .register_validator(
-            validator_addr,
-            validator_addr,
-            initial_stake,
-            0,
-            validator_addr,
-        )
-        .expect("register_validator should succeed");
+    let initial_stake: u128 = 1_000; // This E2E's consensus genesis stake.
 
     // Confirm baseline stake.
     let before = network.nodes[0]
@@ -859,14 +847,9 @@ fn test_slash_evidence_reduces_validator_stake() {
 /// arbitrary `SlashEvidence` entries with no proof.
 #[test]
 fn test_slash_evidence_without_proof_is_skipped() {
-    let mut network = TestNetwork::new(1);
+    let network = TestNetwork::new(1);
     let victim_addr = network._keypairs_cache[0];
-    let initial_stake: u128 = 1_000_000_000;
-
-    network.nodes[0]
-        .staking_state_mut()
-        .register_validator(victim_addr, victim_addr, initial_stake, 0, victim_addr)
-        .expect("register_validator");
+    let initial_stake: u128 = 1_000; // This E2E's consensus genesis stake.
 
     // Construct a block with unproven slash evidence (no votes, no type)
     let fake_evidence = SlashEvidence {

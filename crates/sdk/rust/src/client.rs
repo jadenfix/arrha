@@ -9,6 +9,7 @@ use tokio::net::TcpStream;
 use crate::agent_builder::{
     AgentAuthorizationBuilder, PaymentEnvelopeBuilder, SignatureEnvelopeBuilder, StepReceiptBuilder,
 };
+use crate::chain::{validate_live_fee, ChainFeeParameters};
 use crate::error::AetherSdkError;
 use crate::job_builder::JobBuilder;
 use crate::transaction_builder::TransferBuilder;
@@ -88,9 +89,8 @@ impl AetherClient {
     pub async fn submit(&self, tx: Transaction) -> Result<SubmitResponse, AetherSdkError> {
         tx.verify_signature()
             .map_err(|e| AetherSdkError::InvalidSignature(e.to_string()))?;
-        let fee_params = aether_types::ChainConfig::devnet().fees;
-        tx.calculate_fee(&fee_params)
-            .map_err(|e| AetherSdkError::InvalidFee(e.to_string()))?;
+        let fee_params = self.fee_parameters().await?;
+        validate_live_fee(&tx, &fee_params)?;
 
         let tx_hash = tx.hash();
         let payload = SubmitRpcRequest::new(tx).map_err(AetherSdkError::serialization)?;
@@ -137,6 +137,45 @@ impl AetherClient {
         Ok(SubmitResponse {
             tx_hash: returned_hash,
             accepted: true,
+        })
+    }
+
+    /// Fetch the chain's live transaction fee coefficients.
+    pub async fn fee_parameters(&self) -> Result<ChainFeeParameters, AetherSdkError> {
+        let value = self.rpc_call("aeth_getFeeParameters", &[]).await?;
+        let object = value.as_object().ok_or_else(|| {
+            AetherSdkError::invalid_response("aeth_getFeeParameters: expected object")
+        })?;
+        let decimal = |name: &str| -> Result<u128, AetherSdkError> {
+            let raw = object.get(name).and_then(Value::as_str).ok_or_else(|| {
+                AetherSdkError::invalid_response(format!(
+                    "aeth_getFeeParameters: {name} must be a decimal string"
+                ))
+            })?;
+            if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(AetherSdkError::invalid_response(format!(
+                    "aeth_getFeeParameters: {name} must be a decimal string"
+                )));
+            }
+            raw.parse::<u128>().map_err(|e| {
+                AetherSdkError::invalid_response(format!("aeth_getFeeParameters: {name}: {e}"))
+            })
+        };
+        let chain_id = object
+            .get("chainId")
+            .and_then(Value::as_u64)
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                AetherSdkError::invalid_response(
+                    "aeth_getFeeParameters: chainId must be a positive integer",
+                )
+            })?;
+        Ok(ChainFeeParameters {
+            a: decimal("a")?,
+            b: decimal("b")?,
+            c: decimal("c")?,
+            min_base_fee: decimal("minBaseFee")?,
+            chain_id,
         })
     }
 
@@ -368,19 +407,27 @@ impl AetherClient {
             )));
         }
 
-        let response: JsonRpcResponse<Value> = serde_json::from_str(rpc_body).map_err(|e| {
+        let response: Value = serde_json::from_str(rpc_body).map_err(|e| {
             AetherSdkError::invalid_response(format!("failed to decode rpc response: {e}"))
         })?;
 
-        if let Some(error) = response.error {
+        let object = response.as_object().ok_or_else(|| {
+            AetherSdkError::invalid_response("rpc response must be a JSON object")
+        })?;
+
+        if let Some(error) = object.get("error").filter(|value| !value.is_null()) {
+            let error: JsonRpcError = serde_json::from_value(error.clone()).map_err(|e| {
+                AetherSdkError::invalid_response(format!("failed to decode rpc error: {e}"))
+            })?;
             return Err(AetherSdkError::Rpc {
                 code: error.code,
                 message: error.message,
             });
         }
 
-        response
-            .result
+        object
+            .get("result")
+            .cloned()
             .ok_or_else(|| AetherSdkError::invalid_response("rpc response missing result field"))
     }
 }

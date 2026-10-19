@@ -1,50 +1,7 @@
+use aether_types::saturating_mul_div as mul_div;
 use aether_types::{Address, PublicKey, Signature, H256};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-
-/// Overflow-safe (a * b) / c using 256-bit intermediate product.
-fn mul_div(a: u128, b: u128, c: u128) -> u128 {
-    if c == 0 {
-        return 0;
-    }
-    let a_hi = a >> 64;
-    let a_lo = a & 0xFFFF_FFFF_FFFF_FFFF;
-    let b_hi = b >> 64;
-    let b_lo = b & 0xFFFF_FFFF_FFFF_FFFF;
-
-    let lo_lo = a_lo * b_lo;
-    let hi_lo = a_hi * b_lo;
-    let lo_hi = a_lo * b_hi;
-    let hi_hi = a_hi * b_hi;
-
-    let mid = hi_lo + (lo_lo >> 64);
-    let mid = mid + lo_hi;
-    let carry = if mid < lo_hi { 1u128 } else { 0u128 };
-
-    let product_lo = (mid << 64) | (lo_lo & 0xFFFF_FFFF_FFFF_FFFF);
-    let product_hi = hi_hi + (mid >> 64) + carry;
-
-    div_256_by_128(product_hi, product_lo, c)
-}
-
-fn div_256_by_128(hi: u128, lo: u128, divisor: u128) -> u128 {
-    if hi == 0 {
-        return lo / divisor;
-    }
-    if hi >= divisor {
-        return u128::MAX;
-    }
-    let mut remainder = hi;
-    let mut quotient: u128 = 0;
-    for i in (0..128).rev() {
-        remainder = (remainder << 1) | ((lo >> i) & 1);
-        if remainder >= divisor {
-            remainder -= divisor;
-            quotient |= 1u128 << i;
-        }
-    }
-    quotient
-}
 
 /// A signed vote that can be used as evidence in a slash proof.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,20 +132,13 @@ pub fn verify_slash_proof(proof: &SlashProof) -> anyhow::Result<()> {
             Ok(())
         }
         SlashType::SurroundVote => {
-            if proof.vote1.validator != proof.vote2.validator {
-                anyhow::bail!("votes from different validators");
-            }
-            if proof.validator != proof.vote1.validator {
-                anyhow::bail!(
-                    "proof.validator does not match vote validator — \
-                     cannot slash a different validator than the one who surround-voted"
-                );
-            }
-
-            verify_vote_signature(&proof.vote1)?;
-            verify_vote_signature(&proof.vote2)?;
-
-            Ok(())
+            // SlashVote carries only target slots, not the source/target
+            // ranges needed to prove a surround vote. Signature-valid votes
+            // alone cannot establish this offense, so fail closed until the
+            // wire proof includes the required range fields.
+            anyhow::bail!(
+                "surround-vote slashing is unsupported without source/target range proof"
+            );
         }
         SlashType::Downtime { .. } => {
             // Downtime slashing requires on-chain slot attestation records that

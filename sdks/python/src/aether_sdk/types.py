@@ -6,14 +6,18 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 @dataclass(frozen=True)
 class ClientConfig:
-    default_fee: int = 2_000_000
-    default_gas_limit: int = 500_000
+    default_gas_limit: int = 21_000
 
 
 @dataclass
 class SubmitResponse:
     tx_hash: str
     accepted: bool
+
+
+@dataclass(frozen=True)
+class AirdropResponse:
+    success: bool
 
 
 @dataclass

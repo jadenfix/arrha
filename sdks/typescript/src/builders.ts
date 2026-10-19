@@ -1,15 +1,19 @@
 import { ClientConfig, DEFAULT_CONFIG, JobRequest, JobSubmission } from "./types.js";
-import { Transaction } from "./transaction.js";
+import {
+  calculateTransferFee,
+  Keypair,
+  Transaction,
+  type FeeParameters,
+} from "./transaction.js";
 
 export class TransferBuilder {
   private _recipient?: string;
   private _amount?: bigint;
   private _memo?: string;
-  private _fee: bigint;
+  private _fee?: bigint;
   private _gasLimit: number;
 
   constructor(private readonly config: ClientConfig = DEFAULT_CONFIG) {
-    this._fee = config.defaultFee;
     this._gasLimit = config.defaultGasLimit;
   }
 
@@ -54,37 +58,46 @@ export class TransferBuilder {
     return this;
   }
 
-  build(options: {
-    sender: string;
-    senderPublicKey: string;
-    signature: string;
-    nonce: number;
-  }): Transaction {
+  async build(options: {
+    keypair: Keypair;
+    chainId: bigint;
+    nonce: bigint;
+    feeParameters?: FeeParameters;
+    fee?: bigint;
+  }): Promise<Transaction> {
     if (!this._recipient) {
       throw new Error("recipient not set");
     }
     if (!this._amount) {
       throw new Error("amount not set");
     }
-    if (!options.sender.startsWith("0x")) {
-      throw new Error("sender must be a hex string");
-    }
-    if (options.nonce < 0) {
-      throw new Error("nonce must be non-negative");
-    }
-
-    return new Transaction({
+    const recipient = fromHexAddress(this._recipient);
+    const transfer = {
+      chainId: options.chainId,
       nonce: options.nonce,
-      sender: options.sender,
-      senderPublicKey: options.senderPublicKey,
-      recipient: this._recipient,
+      sender: options.keypair.address,
+      publicKey: options.keypair.publicKey,
+      recipient,
       amount: this._amount,
-      fee: this._fee,
-      gasLimit: this._gasLimit,
+      gasLimit: BigInt(this._gasLimit),
       memo: this._memo,
-      signature: options.signature,
-    });
+    };
+    const fee = options.fee ?? this._fee ?? (options.feeParameters
+      ? calculateTransferFee(transfer, options.feeParameters)
+      : undefined);
+    if (fee === undefined) {
+      throw new Error("fee or live RPC fee parameters are required");
+    }
+    return Transaction.signTransfer({ ...transfer, fee }, options.keypair.secretKey);
   }
+}
+
+function fromHexAddress(value: string): Uint8Array {
+  const normalized = value.startsWith("0x") ? value.slice(2) : value;
+  if (!/^[0-9a-fA-F]{40}$/.test(normalized)) {
+    throw new Error("recipient must be a 20-byte 0x-prefixed hex address");
+  }
+  return Uint8Array.from(normalized.match(/.{2}/g)!, (byte) => Number.parseInt(byte, 16));
 }
 
 export class JobBuilder {

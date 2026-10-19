@@ -95,12 +95,12 @@ connections, matching genesis/validator membership, and every node's event log.
 
 ## Optional Compose and deployment assets
 
-`docker-compose.test.yml` defines genesis initialization, four validators, and a
-runner. `./scripts/docker-test.sh` builds/starts it, runs the runner, and tears it
-down on success. The runner calls `./cli-test --in-process-only`: its scenarios
-use in-memory transport and do not consume the Compose validators' `RPC_URL`.
-A passing runner therefore does not qualify the container network journey.
-Inspect and clean up containers after failures; the helper has no exit trap.
+`docker-compose.test.yml` defines one genesis initializer, four validators on a
+shared network, and a runner that calls the validators' real JSON-RPC endpoints.
+It waits for finality and peer connectivity, submits a signed transfer through
+validator 1, then checks the finalized balance through validator 4.
+`./scripts/docker-test.sh` builds and runs this journey and removes its project
+and named volumes on exit. The CI Docker job runs the same Compose journey.
 
 ```bash
 docker compose -f docker-compose.test.yml ps
@@ -108,12 +108,66 @@ docker compose -f docker-compose.test.yml logs --tail=200
 docker compose -f docker-compose.test.yml down
 ```
 
-`deploy/docker/docker-compose.yml` additionally declares RPC, PostgreSQL,
-indexer, Prometheus, Grafana, and MinIO services. The presence of a service
-manifest does not establish compatible service wiring or readiness. Compose,
-Helm, Kubernetes, and Terraform assets require their own operator-reviewed
-journeys. [CI](../../.github/workflows/ci.yml) builds an image but does not bring
-up Compose, publish images, or deploy remote environments.
+`deploy/docker/docker-compose.yml` includes the canonical Compose journey; it
+does not add separate RPC, database, indexer, Prometheus, Grafana, or MinIO
+services. CI builds the node image and runs the container journey, but does not
+publish images or deploy remote environments.
+
+The Kubernetes and Helm validator templates require an operator-provided
+`genesis.json`, validator key files from the same ceremony, a suitable storage
+class, and an operator-built image. `/health` is the process liveness probe;
+`/ready` remains unavailable until the node has finalized a block and is not
+syncing. These templates have not been qualified against a live cluster.
+The pod entrypoint derives bootstrap peers from `POD_NAME`, `POD_NAMESPACE`,
+`NUM_VALIDATORS`, `AETHER_HEADLESS_SERVICE`, and `AETHER_P2P_PORT` when
+`AETHER_BOOTSTRAP_PEERS` is empty. The headless service name is an explicit
+operator value (the Helm chart default is `aether-validator`); a nonempty
+`AETHER_BOOTSTRAP_PEERS` value overrides derivation. The Compose journey covers
+node-to-node service-name DNS, but does not execute the Kubernetes ordinal
+derivation or qualify cluster networking.
+
+Node configuration precedence is explicit `AETHER_CONFIG_PATH`, then an
+explicit `AETHER_NETWORK` preset, then the chain configuration embedded in the
+validated genesis file, with the devnet preset used only when no genesis is
+provided. A custom genesis should normally be the source of both genesis and
+chain settings; setting `AETHER_CONFIG_PATH` intentionally overrides its chain
+settings. `chainIdentity` covers the full runtime configuration and genesis
+parameters, including validator cryptographic keys and initial accounts. See
+[protocol v2 migration](../migrations/protocol-v2.md) before
+reusing existing state or changing genesis.
+
+## Run the standalone indexer
+
+The indexer is a separate process. Point it at a reachable node RPC endpoint
+and give it a persistent RocksDB path:
+
+```bash
+AETHER_RPC_URL=http://127.0.0.1:8545 \
+INDEXER_DB_PATH=./data/indexer \
+INDEXER_BIND_IP=127.0.0.1 \
+INDEXER_PORT=8081 \
+./target/release/aether-indexer
+```
+
+It indexes finalized blocks only. `GET /status` returns 503 while starting,
+catching up, or retrying a source error, and returns 200 when caught up. Before
+resuming and on each RPC poll, it checks the stored chain ID, genesis hash,
+chain configuration identity, and latest indexed block hash against the node.
+An old database with blocks but no identity metadata is rejected; use a fresh
+`INDEXER_DB_PATH` to rebuild it. `GET /block/{slot}` returns a persisted block
+summary or 404 when that slot has no indexed block.
+
+With a live four-validator devnet and a built indexer binary, run the real
+restart journey while the node is running:
+
+```bash
+AETHER_INDEXER_BIN=target/release/aether-indexer \
+AETHER_RPC_URL=http://127.0.0.1:8545 \
+python3 scripts/indexer-restart-e2e.py
+```
+
+It checks finalized ingestion, reports the chain identity, stops and restarts
+the indexer on the same database, and verifies the persisted checkpoint.
 
 ## Reset development state
 

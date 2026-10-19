@@ -88,6 +88,7 @@ pub async fn perform_transfer(
     let key_material = read_key_file(&key_path)?;
 
     let client = config.client();
+    let fees = client.fee_parameters().await?;
     let mut builder = client.transfer().to(params.recipient).amount(params.amount);
     if let Some(memo) = &params.memo {
         builder = builder.memo(memo.clone());
@@ -99,7 +100,7 @@ pub async fn perform_transfer(
         builder = builder.gas_limit(gas);
     }
 
-    let tx = builder.build(&key_material.keypair, params.nonce)?;
+    let tx = builder.build_with_fee_parameters(&key_material.keypair, params.nonce, &fees)?;
     let tx_clone = tx.clone();
     let response = client.submit(tx).await?;
 

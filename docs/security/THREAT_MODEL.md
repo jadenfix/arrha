@@ -35,13 +35,13 @@ operator decision from the loopback RPC default.
 | Spoofed transaction or validator vote | Transaction signature verification; BLS vote/QC checks; VRF eligibility checks | Audit key registration, PoP enforcement, signed domains, chain binding, duplicate signers and malformed encodings across every ingress path. Crypto helper availability alone proves none of these end-to-end. |
 | Sybil peers / eclipse | P2P connection limits, per-peer rate limiting, reputation and bounded message sizes | An authenticated Noise peer is not automatically an authorized validator. Qualify isolation resistance, reconnect behavior and hostile peer topologies. |
 | Tampered blocks or state | Re-execution, state/receipt root checks, hash-linked blocks, finalized atomic batches | Audit conflicting branches, gap slots, stale certificates, recovery metadata and snapshot trust. Hashes do not repair host compromise. |
-| Repudiation / equivocation | Signed transactions and consensus messages provide evidence | Audit evidence retention and actual slashing dispatch; do not assume an insurance fund, dispute window or governance approval is active in the binary. |
+| Repudiation / equivocation | Valid double-sign observations can be queued as proof; economic staking effects are branch-local and require a finalized block carrying proof verified against the registered BLS key | Check queue behavior, block inclusion, deduplication, finality, and recovery. A local observation or speculative execution is not an applied economic slash. Downtime proofs fail closed until on-chain participation records exist; the staking crate's downtime rate is not an active node penalty. Surround-vote proofs are rejected because their current wire format lacks source/target ranges. |
 | Private-key disclosure | Signing occurs locally in the node | Audit filesystem permissions, logs, memory and backups. HSM/KMS and remote signing are proposals, not an available node mode. |
 | MEV / ordering manipulation | Mempool ordering and fee policy exist | No claim of fair ordering, encrypted mempool or MEV prevention. Review proposer discretion and economic assumptions. |
 | RPC / network DoS | JSON-RPC rate limiter; bounded P2P messages/connections; mempool admission controls | Measure aggregate memory/CPU pressure, malformed inputs and cross-peer abuse. Limits are not adversarial capacity measurements. |
 | State / contract exhaustion | Transaction gas and runtime fuel/memory limits | Review storage growth, account lifecycle, gas accounting and contract host calls. Do not assume all rent/garbage-collection libraries are wired into ledger execution. |
 | WASM privilege escalation | Wasmtime sandbox and host adapter | Audit imports, deterministic behavior, memory access, dependency advisories and operator isolation. No blanket claim that every host call is safe. |
-| Epoch / restart divergence | Epoch rewards and staking changes use a storage batch; finalized branches also commit atomically | Epoch processing is triggered by the slot loop outside block execution. Audit deterministic timing and persistence across restarts/partitions; short devnet runs do not cover a full epoch. |
+| Epoch / restart divergence | Protocol-v2 rewards, completed unbondings, slashing effects, and fee distribution are branch-local block effects; finalized state is committed atomically | Audit rewards at skipped/crossed epoch boundaries, branch replacement, restart recovery, receipt/state-root agreement, and stake-vs-committee semantics. The genesis consensus committee remains fixed; slashing changes economic stake but cannot reconfigure membership. |
 
 ## Libraries and proposed services
 
@@ -86,7 +86,7 @@ fuzzing, penetration tests, hardware attestation or external audits. Unit,
 property and doctest suites are not current runnable gates.
 
 Prioritize external review of `HybridConsensus` and quorum arithmetic, ledger
-state transitions and epoch processing, cryptographic verification and domain
+state transitions and block-bound epoch processing, cryptographic verification and domain
 binding, WASM host isolation, and RPC/P2P resource boundaries. Include library
 settlement and bridges in scope before exposing those services. TLA+ assets
 are specifications requiring reconciliation with the implementation; their

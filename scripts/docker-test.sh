@@ -1,21 +1,14 @@
-#!/bin/bash
-# Aether Blockchain - Docker Test Script
+#!/usr/bin/env bash
+# Build and exercise the real four-validator Compose network.
+set -euo pipefail
 
-set -e
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT="aether-compose-e2e-${$}"
+COMPOSE=(docker compose --project-name "$PROJECT" -f "$ROOT/docker-compose.test.yml")
 
-echo "Building test environment..."
-docker compose -f docker-compose.test.yml build
+cleanup() {
+  "${COMPOSE[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+}
+trap cleanup EXIT INT TERM
 
-echo "Starting 4-node test network..."
-docker compose -f docker-compose.test.yml up -d validator-1 validator-2 validator-3 validator-4
-
-echo "Waiting for network to initialize..."
-sleep 15
-
-echo "Running integration tests..."
-docker compose -f docker-compose.test.yml run test-runner
-
-echo "Stopping test network..."
-docker compose -f docker-compose.test.yml down
-
-echo "Docker tests completed!"
+"${COMPOSE[@]}" up --build --abort-on-container-exit --exit-code-from test-runner test-runner

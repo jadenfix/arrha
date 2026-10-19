@@ -8,7 +8,7 @@ use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -246,6 +246,7 @@ pub struct JsonRpcServer<B: RpcBackend> {
     backend: Arc<RwLock<B>>,
     subscriptions: Arc<SubscriptionManager>,
     port: u16,
+    bind_ip: IpAddr,
     /// The chain ID of the network this server is serving.  Stamped onto
     /// every `aeth_sendTransaction` transaction so callers cannot forge
     /// cross-chain replays via this endpoint.
@@ -265,6 +266,7 @@ impl<B: RpcBackend + 'static> JsonRpcServer<B> {
             backend: Arc::new(RwLock::new(backend)),
             subscriptions: Arc::new(SubscriptionManager::new()),
             port,
+            bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
             chain_id: 1,
             shutdown_signal: None,
             rate_limiter: RateLimiter::new(
@@ -280,6 +282,7 @@ impl<B: RpcBackend + 'static> JsonRpcServer<B> {
             backend: Arc::new(RwLock::new(backend)),
             subscriptions: Arc::new(SubscriptionManager::new()),
             port,
+            bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
             chain_id,
             shutdown_signal: None,
             rate_limiter: RateLimiter::new(
@@ -287,6 +290,16 @@ impl<B: RpcBackend + 'static> JsonRpcServer<B> {
                 DEFAULT_RPC_RATE_LIMIT_PER_SEC,
             ),
         }
+    }
+
+    /// Choose the local address that accepts JSON-RPC connections.
+    ///
+    /// Servers bind to loopback by default. Container and cluster deployments
+    /// must opt in to a non-loopback address so other network namespaces can
+    /// reach the endpoint.
+    pub fn with_bind_ip(mut self, bind_ip: IpAddr) -> Self {
+        self.bind_ip = bind_ip;
+        self
     }
 
     /// Override rate limit parameters.
@@ -367,14 +380,51 @@ impl<B: RpcBackend + 'static> JsonRpcServer<B> {
                 } else {
                     "ok"
                 };
-                Ok::<_, warp::Rejection>(warp::reply::json(&json!({
-                    "status": status,
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "latestSlot": slot,
-                    "finalizedSlot": finalized,
-                    "peerCount": peer_count,
-                    "sync": sync_status,
-                })))
+                Ok::<_, warp::Rejection>(
+                    warp::reply::json(&json!({
+                        "status": status,
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "latestSlot": slot,
+                        "finalizedSlot": finalized,
+                        "peerCount": peer_count,
+                        "sync": sync_status,
+                    }))
+                    .into_response(),
+                )
+            }
+        });
+
+        // Readiness means the node has started finalizing, not merely that its
+        // HTTP task is alive. Keep /health as the process liveness endpoint.
+        let readiness_backend = self.backend.clone();
+        let ready = warp::get().and(warp::path("ready")).and_then(move || {
+            let backend = readiness_backend.clone();
+            async move {
+                let backend = backend.read().await;
+                let finalized = backend.get_finalized_slot().unwrap_or(0);
+                let sync_status = backend
+                    .get_sync_status()
+                    .unwrap_or_else(|_| json!({"syncing": true, "status": "unavailable"}));
+                let syncing = sync_status
+                    .get("syncing")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                let status = if finalized > 0 && !syncing {
+                    warp::http::StatusCode::OK
+                } else {
+                    warp::http::StatusCode::SERVICE_UNAVAILABLE
+                };
+                Ok::<_, warp::Rejection>(
+                    warp::reply::with_status(
+                        warp::reply::json(&json!({
+                            "ready": status.is_success(),
+                            "finalizedSlot": finalized,
+                            "syncing": syncing,
+                        })),
+                        status,
+                    )
+                    .into_response(),
+                )
             }
         });
 
@@ -402,6 +452,7 @@ impl<B: RpcBackend + 'static> JsonRpcServer<B> {
                     }
                     handle_ws_connection(socket, subs, count).await;
                 })
+                .into_response()
             });
 
         let cors_origins: Vec<String> = std::env::var("CORS_ORIGINS")
@@ -410,6 +461,8 @@ impl<B: RpcBackend + 'static> JsonRpcServer<B> {
                 vec![
                     "http://localhost:3000".to_string(),
                     "http://127.0.0.1:3000".to_string(),
+                    "http://localhost:3001".to_string(),
+                    "http://127.0.0.1:3001".to_string(),
                 ]
             });
         let mut cors = warp::cors()
@@ -419,23 +472,37 @@ impl<B: RpcBackend + 'static> JsonRpcServer<B> {
             cors = cors.allow_origin(origin.as_str());
         }
 
-        let routes = rpc.or(health).or(ws).recover(handle_rejection).with(cors);
+        let routes = rpc
+            .or(health)
+            .unify()
+            .or(ready)
+            .unify()
+            .or(ws)
+            .unify()
+            .recover(handle_rejection)
+            .with(cors)
+            .boxed();
+
+        let bind_addr = std::net::SocketAddr::new(self.bind_ip, self.port);
 
         tracing::info!(
             port = self.port,
             rate_limit_burst = self.rate_limiter.max_tokens,
             rate_limit_per_sec = self.rate_limiter.refill_rate,
-            "JSON-RPC server listening on 127.0.0.1:{}",
-            self.port
+            "JSON-RPC server listening on {}",
+            bind_addr
         );
-        tracing::info!("WebSocket subscriptions on ws://127.0.0.1:{}/ws", self.port);
+        tracing::info!("WebSocket subscriptions on ws://{}/ws", bind_addr);
 
         if let Some(signal) = self.shutdown_signal {
-            let (_, server) = warp::serve(routes)
-                .bind_with_graceful_shutdown(([127, 0, 0, 1], self.port), signal);
-            server.await;
+            warp::serve(routes)
+                .bind(bind_addr)
+                .await
+                .graceful(signal)
+                .run()
+                .await;
         } else {
-            warp::serve(routes).run(([127, 0, 0, 1], self.port)).await;
+            warp::serve(routes).run(bind_addr).await;
         }
 
         tracing::info!("RPC server stopped");
@@ -443,7 +510,7 @@ impl<B: RpcBackend + 'static> JsonRpcServer<B> {
     }
 }
 
-async fn handle_rejection(err: warp::Rejection) -> Result<impl Reply, warp::Rejection> {
+async fn handle_rejection(err: warp::Rejection) -> Result<warp::reply::Response, warp::Rejection> {
     if err.find::<RateLimited>().is_some() {
         Ok(warp::reply::with_status(
             warp::reply::json(&json!({
@@ -455,7 +522,8 @@ async fn handle_rejection(err: warp::Rejection) -> Result<impl Reply, warp::Reje
                 "id": null
             })),
             warp::http::StatusCode::TOO_MANY_REQUESTS,
-        ))
+        )
+        .into_response())
     } else {
         Err(err)
     }
@@ -532,7 +600,7 @@ async fn handle_rpc_request<B: RpcBackend>(
     req: JsonRpcRequest,
     backend: Arc<RwLock<B>>,
     chain_id: u64,
-) -> Result<impl Reply, warp::Rejection> {
+) -> Result<warp::reply::Response, warp::Rejection> {
     let req_id = req.id.clone();
     let response = match tokio::time::timeout(
         Duration::from_secs(30),
@@ -555,7 +623,7 @@ async fn handle_rpc_request<B: RpcBackend>(
             }
         }
     };
-    Ok(warp::reply::json(&response))
+    Ok(warp::reply::json(&response).into_response())
 }
 
 async fn process_rpc_request<B: RpcBackend>(
@@ -564,6 +632,7 @@ async fn process_rpc_request<B: RpcBackend>(
     chain_id: u64,
 ) -> JsonRpcResponse {
     let method = req.method.clone();
+    let params = req.params;
     RPC_METRICS
         .requests_total
         .with_label_values(&[&method])
@@ -572,22 +641,22 @@ async fn process_rpc_request<B: RpcBackend>(
         .request_duration_seconds
         .with_label_values(&[&method])
         .start_timer();
-    let result = match req.method.as_str() {
-        "aeth_sendRawTransaction" => handle_send_raw_transaction(&req.params, backend).await,
-        "aeth_sendTransaction" => handle_send_transaction(&req.params, backend, chain_id).await,
+    let result = match method.as_str() {
+        "aeth_sendRawTransaction" => handle_send_raw_transaction(params, backend).await,
+        "aeth_sendTransaction" => handle_send_transaction(params, backend, chain_id).await,
         "aeth_chainId" => Ok(json!(format!("0x{:x}", chain_id))),
-        "aeth_getBlockByNumber" => handle_get_block_by_number(&req.params, backend).await,
-        "aeth_getBlockByHash" => handle_get_block_by_hash(&req.params, backend).await,
-        "aeth_getTransactionReceipt" => handle_get_transaction_receipt(&req.params, backend).await,
-        "aeth_getStateRoot" => handle_get_state_root(&req.params, backend).await,
-        "aeth_getAccount" => handle_get_account(&req.params, backend).await,
+        "aeth_getBlockByNumber" => handle_get_block_by_number(params, backend).await,
+        "aeth_getBlockByHash" => handle_get_block_by_hash(params, backend).await,
+        "aeth_getTransactionReceipt" => handle_get_transaction_receipt(params, backend).await,
+        "aeth_getStateRoot" => handle_get_state_root(params, backend).await,
+        "aeth_getAccount" => handle_get_account(params, backend).await,
         "aeth_getSlotNumber" => handle_get_slot_number(backend).await,
         "aeth_getFinalizedSlot" => handle_get_finalized_slot(backend).await,
-        "aeth_requestAirdrop" => handle_request_airdrop(&req.params, backend).await,
+        "aeth_requestAirdrop" => handle_request_airdrop(params, backend).await,
         "aeth_health" => handle_health(backend).await,
         other => {
             let backend = backend.read().await;
-            match backend.extension(other, &req.params) {
+            match backend.extension(other, &params) {
                 Some(Ok(value)) => Ok(value),
                 Some(Err(e)) => Err(JsonRpcError {
                     code: -32000,
@@ -624,7 +693,7 @@ async fn process_rpc_request<B: RpcBackend>(
 }
 
 async fn handle_send_raw_transaction<B: RpcBackend>(
-    params: &[Value],
+    params: Vec<Value>,
     backend: Arc<RwLock<B>>,
 ) -> Result<Value, JsonRpcError> {
     if params.is_empty() {
@@ -663,7 +732,7 @@ async fn handle_send_raw_transaction<B: RpcBackend>(
 }
 
 async fn handle_send_transaction<B: RpcBackend>(
-    params: &[Value],
+    params: Vec<Value>,
     backend: Arc<RwLock<B>>,
     chain_id: u64,
 ) -> Result<Value, JsonRpcError> {
@@ -749,7 +818,7 @@ async fn handle_send_transaction<B: RpcBackend>(
 }
 
 async fn handle_get_block_by_number<B: RpcBackend>(
-    params: &[Value],
+    params: Vec<Value>,
     backend: Arc<RwLock<B>>,
 ) -> Result<Value, JsonRpcError> {
     if params.len() < 2 {
@@ -850,7 +919,7 @@ fn parse_u128_value(value: &Value, field: &str) -> Result<u128, JsonRpcError> {
 }
 
 async fn handle_get_block_by_hash<B: RpcBackend>(
-    params: &[Value],
+    params: Vec<Value>,
     backend: Arc<RwLock<B>>,
 ) -> Result<Value, JsonRpcError> {
     if params.len() < 2 {
@@ -897,7 +966,7 @@ async fn handle_get_block_by_hash<B: RpcBackend>(
 }
 
 async fn handle_get_transaction_receipt<B: RpcBackend>(
-    params: &[Value],
+    params: Vec<Value>,
     backend: Arc<RwLock<B>>,
 ) -> Result<Value, JsonRpcError> {
     if params.is_empty() {
@@ -942,7 +1011,7 @@ async fn handle_get_transaction_receipt<B: RpcBackend>(
 }
 
 async fn handle_get_state_root<B: RpcBackend>(
-    params: &[Value],
+    params: Vec<Value>,
     backend: Arc<RwLock<B>>,
 ) -> Result<Value, JsonRpcError> {
     let block_ref = params.first().and_then(|v| v.as_str()).map(String::from);
@@ -960,7 +1029,7 @@ async fn handle_get_state_root<B: RpcBackend>(
 }
 
 async fn handle_get_account<B: RpcBackend>(
-    params: &[Value],
+    params: Vec<Value>,
     backend: Arc<RwLock<B>>,
 ) -> Result<Value, JsonRpcError> {
     if params.is_empty() {
@@ -1033,7 +1102,7 @@ async fn handle_get_finalized_slot<B: RpcBackend>(
 }
 
 async fn handle_request_airdrop<B: RpcBackend>(
-    params: &[Value],
+    params: Vec<Value>,
     backend: Arc<RwLock<B>>,
 ) -> Result<Value, JsonRpcError> {
     if params.len() < 2 {

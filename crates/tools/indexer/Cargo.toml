@@ -13,10 +13,10 @@ serde.workspace = true
 serde_json.workspace = true
 bincode.workspace = true
 rocksdb.workspace = true
-warp = "0.3"
+warp = { version = "0.4", features = ["server"] }
 
 aether-types = { path = "../../types" }
-aether-rpc-grpc = { path = "../../rpc/grpc-firehose" }
+aether-sdk = { path = "../../sdk/rust" }
 
 [lib]
 test = false

@@ -48,11 +48,10 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked || true
+        run: cargo install cargo-audit --version 0.22.2 --locked
 
       - name: Security audit dependencies
-        run: cargo audit
-        continue-on-error: true
+        run: cargo audit --deny unsound --deny yanked
 
   web-build:
     name: Web workspace build
@@ -119,23 +118,42 @@ jobs:
   # Docker: build and validate container image
   # ──────────────────────────────────────────────
   docker:
-    name: Docker Build
+    name: Docker Compose E2E (4 validators)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image
+      - name: Build validator and test-runner image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: false
-          tags: aether-node:${{ github.sha }}
+          load: true
+          tags: aether-node:compose-e2e
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Run shared-genesis container journey
+        run: docker compose --project-name aether-ci -f docker-compose.test.yml up --no-build --abort-on-container-exit --exit-code-from test-runner test-runner
+
+      - name: Capture container logs on failure
+        if: failure()
+        run: docker compose --project-name aether-ci -f docker-compose.test.yml logs --no-color > docker-compose-e2e.log || true
+
+      - name: Upload container logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-compose-e2e-logs
+          path: docker-compose-e2e.log
+
+      - name: Stop container journey
+        if: always()
+        run: docker compose --project-name aether-ci -f docker-compose.test.yml down --volumes --remove-orphans
 
   # ──────────────────────────────────────────────
   # Integration: in-process e2e tests (no Docker)
@@ -179,11 +197,29 @@ jobs:
     env:
       CARGO_PROFILE_RELEASE_LTO: thin
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      AETHER_INDEXER_BIN: target/release/aether-indexer
+      AETHER_PYTHON_BIN: python
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install client journey dependencies
+        run: |
+          npm ci
+          npm run build:web
+          python -m pip install ./sdks/python
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -196,10 +232,10 @@ jobs:
           restore-keys: ${{ runner.os }}-devnet-e2e-
 
       - name: Build node, genesis ceremony and aetherctl
-        run: cargo build --release -p aether-node -p aether-cli --bins
+        run: cargo build --release -p aether-node -p aether-cli -p aether-indexer --bins
 
       - name: Run devnet E2E
-        run: SKIP_BUILD=1 KEEP_DEVNET_DATA=1 ./scripts/e2e-devnet.sh
+        run: RUN_CLIENT_E2E=1 RUN_INDEXER_E2E=1 SKIP_BUILD=1 KEEP_DEVNET_DATA=1 ./scripts/e2e-devnet.sh
 
       - name: Upload devnet logs on failure
         if: failure()

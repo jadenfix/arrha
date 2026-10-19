@@ -9,8 +9,9 @@ Rust package and binary names still use Aether.
 The binary assembles JSON-RPC, a mempool, VRF/HotStuff/BLS consensus, sequential
 ledger execution with Wasmtime contracts, libp2p/TCP networking, finalized
 RocksDB persistence, and Prometheus metrics. Parallel scheduler, QUIC/Turbine,
-AI service/verifier libraries, and the local firehose/indexer are separate
-components. Do not claim their presence is end-to-end node integration.
+AI service/verifier libraries, and the local firehose are separate components.
+The standalone indexer polls finalized node RPC and persists its own RocksDB
+index; the node does not start it. Do not claim their presence is end-to-end node integration.
 
 ## Commands
 

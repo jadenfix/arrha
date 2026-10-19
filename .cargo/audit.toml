@@ -1,9 +1,12 @@
 [advisories]
-# hickory-proto remains in Cargo.lock via libp2p DNS/mdns optional packages,
-# but Aether disables libp2p default features and does not enable DNS/mdns.
-# Verified with:
-#   cargo tree --workspace --all-features --target all -i hickory-proto@0.25.2
-ignore = [
-    "RUSTSEC-2026-0118",
-    "RUSTSEC-2026-0119",
-]
+# hickory-proto remains in Cargo.lock through libp2p optional DNS/mdns packages.
+# They are disabled; bootstrap DNS uses bounded OS lookup instead. Verify with:
+# cargo tree --workspace --all-features --target all -i hickory-proto@0.25.2
+# Revisit these exceptions if transport features change.
+#
+# reed-solomon-erasure 6.0.0 pins lru 0.7. Its only cache key is Vec<usize>,
+# which has no panicking Drop; its cache operations are get/put, never pop.
+# RUSTSEC-2026-0253 requires pop with a panicking key Drop and catch_unwind.
+# No workspace crate depends directly on lru. Revisit with any RS dependency
+# or cache-use change; remove this exception when upstream updates lru.
+ignore = ["RUSTSEC-2026-0118", "RUSTSEC-2026-0119", "RUSTSEC-2026-0253"]

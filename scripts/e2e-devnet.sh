@@ -19,6 +19,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export DEVNET_DIR="${DEVNET_DIR:-$ROOT/data/e2e-devnet}"
 export VALIDATORS=4
+export DEVNET_DNS_HOST="${DEVNET_DNS_HOST:-localhost}"
 BIN_DIR="${AETHER_BIN_DIR:-${CARGO_TARGET_DIR:-$ROOT/target}/release}"
 export AETHER_BIN_DIR="$BIN_DIR"
 CTL="$BIN_DIR/aetherctl"
@@ -31,7 +32,10 @@ fi
 export SKIP_BUILD=1
 
 cleanup() {
-  "$ROOT/scripts/devnet.sh" stop >/dev/null 2>&1 || true
+  if ! "$ROOT/scripts/devnet.sh" stop; then
+    echo "Cleanup could not verify all process owners; preserving $DEVNET_DIR" >&2
+    return 1
+  fi
   if [ -z "${KEEP_DEVNET_DATA:-}" ]; then rm -rf "$DEVNET_DIR"; fi
 }
 trap cleanup EXIT
@@ -113,5 +117,19 @@ H1=$(rpc "$RPC1" aeth_getBlockSummaries "[$S,$S]" | jget "['result'][0]['hash']"
 H4=$(rpc http://127.0.0.1:8548 aeth_getBlockSummaries "[$S,$S]" | jget "['result'][0]['hash']")
 [ "$H1" = "$H4" ] || fail "validators 1 and 4 disagree at slot $S: $H1 vs $H4"
 echo "   slot $S: $H1 on validators 1 and 4"
+
+if [ "${RUN_CLIENT_E2E:-0}" = "1" ]; then
+  echo "== 9. TypeScript and Python signed transfers across validators"
+  export AETHERCTL_BIN="$CTL"
+  export AETHER_RPC_FROM="$RPC1"
+  export AETHER_RPC_READ="$RPC3"
+  node "$ROOT/scripts/client-e2e.mjs" || fail "TypeScript signed transfer journey"
+  "${AETHER_PYTHON_BIN:-python3}" "$ROOT/scripts/client-e2e.py" || fail "Python signed transfer journey"
+fi
+
+if [ "${RUN_INDEXER_E2E:-0}" = "1" ]; then
+  echo "== 10. persistent indexer finalized-chain restart"
+  "${AETHER_PYTHON_BIN:-python3}" "$ROOT/scripts/indexer-restart-e2e.py" || fail "persistent indexer restart journey"
+fi
 
 echo "E2E PASSED"

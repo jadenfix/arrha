@@ -1,6 +1,8 @@
 # Aether Security Audit Scope
 
-Reviewed **2026-10-18**, implementation baseline `b5460e8` (PR #413).
+Reviewed **2026-10-18** against the working tree following historical main
+baseline `b5460e8` (PR #413). The repair changes remain uncommitted and are not
+release qualification.
 This document scopes a security review of the repository. The goal is to focus audit effort on the code paths and interfaces that carry the highest protocol and operational risk while also accounting for the project’s current delivery model.
 
 ## Audit Goals
@@ -58,7 +60,7 @@ Primary concerns:
 - `apps/*`
 - `deploy/*`
 - `Dockerfile`
-- `Dockerfile.test`
+- `Dockerfile.test` (removed; container journey is defined by the canonical image and Compose runner)
 - `docker-compose.test.yml`
 - `.github/workflows/ci.yml`
 
@@ -105,7 +107,7 @@ Auditors should account for the project’s present operating model:
 
 - GitHub Actions defines Rust lint/build, in-process E2E, real four-process devnet E2E, web builds and Docker image builds; workflow presence is distinct from a passing run on the audited commit. It does not publish releases or deploy.
 - The web-build job runs `npm ci` and `npm run build:web`. This is build coverage, not browser E2E or Python SDK qualification.
-- `cargo audit` is allowed to fail; a passing workflow is not proof of a clean dependency audit.
+- CI `cargo audit` fails on unexcepted vulnerabilities, unsound advisories, and yanked crates. Unmaintained advisories remain visible for review. The exact advisory exceptions in `.cargo/audit.toml` cover disabled optional Hickory DNS packages and `lru 0.7.8` only through `reed-solomon`'s non-panicking `Vec<usize>` cache-key path; they do not suppress whole warning classes.
 - Deployment assets exist for multiple environments, but rollout is still operator-driven rather than CI-driven.
 - Some deployment and infrastructure assets may therefore require manual review in addition to code review.
 
@@ -137,5 +139,8 @@ Auditors should account for the project’s present operating model:
   authentication, actual balance movement and persistence before node exposure.
 - The remote-signer document is a proposal. There is no operational HSM path
   to qualify yet.
-- Epoch rewards are written in a slot-driven storage batch outside blocks;
-  review their timing and recovery separately from finalized block commits.
+- Protocol-v2 reward/unbonding/slashing/fee effects are evaluated on candidate
+  block branches and become durable only with finalization. The genesis
+  consensus committee remains fixed; economic stake changes do not reconfigure
+  membership. Review branch replacement, crossed epochs, restart recovery, and
+  state/receipt root agreement.

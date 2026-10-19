@@ -17,6 +17,8 @@
 // ============================================================================
 
 pub mod account;
+pub mod arithmetic;
+pub use arithmetic::saturating_mul_div;
 pub mod block;
 pub mod chain_config;
 pub mod consensus;

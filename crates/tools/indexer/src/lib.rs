@@ -1,3 +1,3 @@
 pub mod store;
 
-pub use store::{IndexedBlock, PersistentStore};
+pub use store::{ChainIdentity, IndexedBlock, PersistentStore};

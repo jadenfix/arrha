@@ -74,7 +74,10 @@ impl FeeMarket {
         total_fees_collected: u128,
     ) -> BlockFeeResult {
         // Calculate burn amount (base_fee * gas_used)
-        let burned = self.base_fee.saturating_mul(block_gas_used as u128);
+        let burned = self
+            .base_fee
+            .saturating_mul(block_gas_used as u128)
+            .min(total_fees_collected);
         // Priority fee (tip) is the remainder after the base fee burn
         let priority_fee = total_fees_collected.saturating_sub(burned);
 

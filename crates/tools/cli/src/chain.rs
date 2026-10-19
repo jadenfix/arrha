@@ -176,7 +176,7 @@ impl ChainArgs {
                 let finalized = client
                     .call_rpc("aeth_getAccount", vec![json!(addr)])
                     .await
-                    .unwrap_or(Value::Null);
+                    .map_err(rpc)?;
                 let pending = client
                     .call_rpc("aeth_getPendingAccount", vec![json!(addr)])
                     .await
@@ -192,7 +192,16 @@ impl ChainArgs {
                 let kp = signer.keypair()?;
                 let chain_id = client.chain_id().await.map_err(rpc)?;
                 let nonce = client.next_nonce(&kp).await.map_err(rpc)?;
-                let tx = chain::transfer_tx(&kp, chain_id, nonce, resolve_address(to)?, *amount);
+                let fees = client.fee_parameters().await.map_err(rpc)?;
+                let tx = chain::transfer_tx_with_fee_parameters(
+                    &kp,
+                    chain_id,
+                    nonce,
+                    resolve_address(to)?,
+                    *amount,
+                    &fees,
+                )
+                .map_err(rpc)?;
                 let hash = client.send_transaction(&tx).await.map_err(rpc)?;
                 finish(&client, hash, *wait).await?
             }
@@ -209,7 +218,10 @@ impl ChainArgs {
                 let kp = signer.keypair()?;
                 let chain_id = client.chain_id().await.map_err(rpc)?;
                 let nonce = client.next_nonce(&kp).await.map_err(rpc)?;
-                let (tx, address) = chain::deploy_tx(&kp, chain_id, nonce, code);
+                let fees = client.fee_parameters().await.map_err(rpc)?;
+                let (tx, address) =
+                    chain::deploy_tx_with_fee_parameters(&kp, chain_id, nonce, code, &fees)
+                        .map_err(rpc)?;
                 let hash = client.send_transaction(&tx).await.map_err(rpc)?;
                 let mut out = finish(&client, hash, *wait).await?;
                 out["contract"] = json!(hex0x(address.as_bytes()));
@@ -231,8 +243,17 @@ impl ChainArgs {
                 let kp = signer.keypair()?;
                 let chain_id = client.chain_id().await.map_err(rpc)?;
                 let nonce = client.next_nonce(&kp).await.map_err(rpc)?;
-                let tx =
-                    chain::call_tx(&kp, chain_id, nonce, resolve_address(contract)?, data, *gas);
+                let fees = client.fee_parameters().await.map_err(rpc)?;
+                let tx = chain::call_tx_with_fee_parameters(
+                    &kp,
+                    chain_id,
+                    nonce,
+                    resolve_address(contract)?,
+                    data,
+                    *gas,
+                    &fees,
+                )
+                .map_err(rpc)?;
                 let hash = client.send_transaction(&tx).await.map_err(rpc)?;
                 finish(&client, hash, *wait).await?
             }

@@ -1,66 +1,7 @@
+use aether_types::saturating_mul_div as mul_div;
 use aether_types::Address;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-/// Overflow-safe `(a * b) / c` for u128 using u256 intermediate arithmetic.
-/// Returns 0 when `c == 0` (prevents division-by-zero panics in reward distribution).
-///
-/// `saturating_mul(b) / c` silently caps at `u128::MAX` when `a * b` exceeds 2^128,
-/// producing drastically wrong results for large stakes (e.g. trillions of tokens).
-/// This helper widens to 256 bits so the full product is preserved.
-fn mul_div(a: u128, b: u128, c: u128) -> u128 {
-    if c == 0 {
-        return 0;
-    }
-    // Widen to (u128, u128) representing a 256-bit product via long multiplication.
-    // Split each operand into two 64-bit halves to avoid overflow.
-    let a_hi = a >> 64;
-    let a_lo = a & 0xFFFF_FFFF_FFFF_FFFF;
-    let b_hi = b >> 64;
-    let b_lo = b & 0xFFFF_FFFF_FFFF_FFFF;
-
-    let lo_lo = a_lo * b_lo;
-    let hi_lo = a_hi * b_lo;
-    let lo_hi = a_lo * b_hi;
-    let hi_hi = a_hi * b_hi;
-
-    // Accumulate into (high_128, low_128)
-    let mid = hi_lo + (lo_lo >> 64);
-    let mid = mid + lo_hi; // Note: can overflow, carry goes to hi_hi
-    let carry = if mid < lo_hi { 1u128 } else { 0u128 };
-
-    let product_lo = (mid << 64) | (lo_lo & 0xFFFF_FFFF_FFFF_FFFF);
-    let product_hi = hi_hi + (mid >> 64) + carry;
-
-    // Divide 256-bit (product_hi, product_lo) by c using long division.
-    // Since c is u128 and result fits in u128 for our use cases, this is safe.
-    div_256_by_128(product_hi, product_lo, c)
-}
-
-/// Divide a 256-bit number (hi, lo) by a u128 divisor, returning the u128 quotient.
-/// Saturates to u128::MAX if the quotient exceeds 128 bits (shouldn't happen in
-/// our reward/slash calculations since the result is a fraction of the inputs).
-fn div_256_by_128(hi: u128, lo: u128, divisor: u128) -> u128 {
-    if hi == 0 {
-        return lo / divisor;
-    }
-    // If hi >= divisor, result > u128::MAX, saturate
-    if hi >= divisor {
-        return u128::MAX;
-    }
-    // Binary long division: we know hi < divisor, so quotient fits in 128 bits.
-    // Process 128 bits of `lo` one bit at a time with `hi` as initial remainder.
-    let mut remainder = hi;
-    let mut quotient: u128 = 0;
-    for i in (0..128).rev() {
-        remainder = (remainder << 1) | ((lo >> i) & 1);
-        if remainder >= divisor {
-            remainder -= divisor;
-            quotient |= 1u128 << i;
-        }
-    }
-    quotient
-}
 
 #[derive(Debug, Error)]
 pub enum StakingError {

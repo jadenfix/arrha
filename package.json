@@ -9,6 +9,12 @@
   ],
   "scripts": {
     "build:sdk": "npm run build --prefix sdks/typescript",
-    "build:web": "npm run build --workspaces --if-present"
+    "build:web": "npm run build --workspaces --if-present",
+    "dev:explorer": "npm run dev --workspace @aether/explorer",
+    "dev:wallet": "npm run dev --workspace @aether/wallet",
+    "e2e:client": "npm run build:sdk && node scripts/client-e2e.mjs"
+  },
+  "devDependencies": {
+    "vite": "^8.3.4"
   }
 }

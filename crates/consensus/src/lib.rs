@@ -51,6 +51,29 @@ pub trait ConsensusEngine: Finality + Send + Sync {
         0
     }
 
+    /// Stake used for votes and certificates in the epoch containing `slot`.
+    /// Engines with frozen committees should override this so slashes do not
+    /// retroactively change an epoch's voting threshold.
+    fn validator_stake_at_slot(&self, address: &aether_types::Address, _slot: Slot) -> u128 {
+        self.validator_stake(address)
+    }
+
+    fn total_stake_at_slot(&self, _slot: Slot) -> u128 {
+        self.total_stake()
+    }
+
+    /// Stake snapshot used to distribute rewards at the start of `epoch`.
+    fn validator_addresses_and_stakes_at_epoch(
+        &self,
+        _epoch: u64,
+    ) -> Vec<(aether_types::Address, u128)> {
+        self.validator_addresses_and_stakes()
+    }
+
+    fn total_stake_at_epoch(&self, _epoch: u64) -> u128 {
+        self.total_stake()
+    }
+
     fn is_timed_out(&self) -> bool {
         false
     }

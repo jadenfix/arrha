@@ -1,0 +1,107 @@
+{
+  "network": "Arbitrum Sepolia",
+  "chainId": 421614,
+  "escrow": "0xF18e16406B871d67CFAFd30f9630c294474Eb566",
+  "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+  "observedAt": "2026-10-19T08:11:22.140Z",
+  "baseline": {
+    "0x551fB2a948b56Ab1Da7ca76e829a2bf3b267648D": "18600000",
+    "0x5bbe43e2c14334928f10448C2aBaE0e7Ec2E4861": "1400000",
+    "0xF18e16406B871d67CFAFd30f9630c294474Eb566": "0"
+  },
+  "balances": {
+    "0x551fB2a948b56Ab1Da7ca76e829a2bf3b267648D": "17200000",
+    "0x5bbe43e2c14334928f10448C2aBaE0e7Ec2E4861": "2800000",
+    "0xF18e16406B871d67CFAFd30f9630c294474Eb566": "0"
+  },
+  "outstanding": "0",
+  "runs": {
+    "payout": {
+      "runId": "0x11fdfe10f20ff22135aa5e175f3e40254fd5b41713cafbb3a31d779d530ff4b9",
+      "evidenceHash": "0x758c1542a9fb0aad663a0044e0ed5adc86c06d6219b5c4a9dec16aa2caceaa0d"
+    },
+    "refund": {
+      "runId": "0x9aa5038a6d30dd53c8e7bf5fa3ed9e3bbfdb8474c2b60d32a056117b614b645a",
+      "evidenceHash": "0x758c1542a9fb0aad663a0044e0ed5adc86c06d6219b5c4a9dec16aa2caceaa0d"
+    },
+    "dispute": {
+      "runId": "0xeb283e588f159e01218c6d26e641729312530b0718ca2d6c997fdadd2ba8a7bd",
+      "evidenceHash": "0x758c1542a9fb0aad663a0044e0ed5adc86c06d6219b5c4a9dec16aa2caceaa0d"
+    }
+  },
+  "operations": [
+    {
+      "id": "0xf18e16406b871d67cfafd30f9630c294474eb566:dispute:resolve",
+      "hash": "0xc5b2c821c4b39640956327bbaf9573b0277ad1ff053740c7a60c14e5a2f2dbd1",
+      "status": "Included"
+    },
+    {
+      "id": "0xf18e16406b871d67cfafd30f9630c294474eb566:payout:accept",
+      "hash": "0x1cf67cbfa76608403947ceca4a8b548ddb11f489fa57cd26016588247cd567f5",
+      "status": "Included"
+    },
+    {
+      "id": "0xf18e16406b871d67cfafd30f9630c294474eb566:payout:deliver",
+      "hash": "0x593635fa1ea9e6b0e8d032ae2d4c81bc39833f81327d8e408bdaae61a296b160",
+      "status": "Included"
+    },
+    {
+      "id": "0xf18e16406b871d67cfafd30f9630c294474eb566:dispute:accept",
+      "hash": "0xc9a6edb77f82253cc96725bd3045557a4b1a14c8ec1109d49a1b6e87dd5f29eb",
+      "status": "Included"
+    },
+    {
+      "id": "0xf18e16406b871d67cfafd30f9630c294474eb566:dispute:deliver",
+      "hash": "0x05fcd0f5ad4dfa7102508671791ab0d4b8d1171ae9074785706dbc161eb7a6a0",
+      "status": "Included"
+    },
+    {
+      "id": "0xf18e16406b871d67cfafd30f9630c294474eb566:approve-three-test-usdc",
+      "hash": "0x418ed465ea477b02ca754e3e450d38aa79b6fea3242607b413095a622added0c",
+      "status": "Included"
+    },
+    {
+      "id": "0xf18e16406b871d67cfafd30f9630c294474eb566:payout:fund",
+      "hash": "0xae48e05789abb7f0f68adf06c03864cf25bcbba0b002bd8d8ebe0c236a818f76",
+      "status": "Included"
+    },
+    {
+      "id": "0xf18e16406b871d67cfafd30f9630c294474eb566:payout:settle",
+      "hash": "0x7d532ffd056bdfa738ae75515aeaffa22c2969325ed49ce03286b1f9d29cffce",
+      "status": "Included"
+    },
+    {
+      "id": "0xf18e16406b871d67cfafd30f9630c294474eb566:refund:fund",
+      "hash": "0x463d66faeae2dec774cd3c2c5ed4c4692b54ecca8f027b7cda55971237ed3fc2",
+      "status": "Included"
+    },
+    {
+      "id": "0xf18e16406b871d67cfafd30f9630c294474eb566:refund:refund",
+      "hash": "0x0675206b523845589ffb702bb6731418e4224b60b2abf5db5e3ac7d46ebda796",
+      "status": "Included"
+    },
+    {
+      "id": "0xf18e16406b871d67cfafd30f9630c294474eb566:dispute:fund",
+      "hash": "0x34629e4523400c9f4416221c80b4c2c6c5ce6b89d12bd452cf91bc6c76afe789",
+      "status": "Included"
+    },
+    {
+      "id": "0xf18e16406b871d67cfafd30f9630c294474eb566:dispute:dispute",
+      "hash": "0x4357cf9ef66a19c79ce530e4ca469ebc63eff05116de7a2c3e9496cf532a260a",
+      "status": "Included"
+    }
+  ],
+  "projection": {
+    "availability": "available",
+    "chainId": 421614,
+    "escrow": "0xF18e16406B871d67CFAFd30f9630c294474Eb566",
+    "finalityPolicy": "finalized",
+    "block": 320665542,
+    "blockHash": "0x64b8a816c25623250fec4dfba88972d7e738311a5cc01fdff8e3be8497d4493a",
+    "eventCount": 0,
+    "outstanding": "0",
+    "runs": [],
+    "observedAt": "2026-10-19T08:11:22.139Z"
+  },
+  "allFinalized": false
+}

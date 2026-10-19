@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": "1",
+  "chainId": 421614,
+  "escrow": "0xF18e16406B871d67CFAFd30f9630c294474Eb566",
+  "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+  "assetCodeHash": "0x9a736af6aac290d9196883e8686fc1d127ff657ca534fe4b88d6d40dc0bc6750",
+  "decimals": 6,
+  "maxPerRun": "1000000",
+  "maxOutstanding": "10000000",
+  "assetName": "Circle testnet USDC - no monetary value",
+  "deploymentBlock": 320668735,
+  "deploymentTransaction": "0x75b3dfbf338bc1739efe8fe84de020d0b755ca85c5be169746b1bb2f6dad7906",
+  "runtimeHash": "0x6c560a85b0f943085267eb0977ddc5c8911231ef58885ab40375a6eede8ced01",
+  "finality": "finalized",
+  "maxBackfillBlocks": 100000,
+  "explorer": "https://sepolia.arbiscan.io",
+  "qualification": "Strict-debit v2 exact source match; public SDK payout/refund/dispute included with exact balances and zero liabilities; parent-finality/index projection pending; independent review pending",
+  "deploymentVersion": 2,
+  "sourceRevision": "6f4193e25ca3d7d62f8184d6cbfbe37828f0df21",
+  "escrowSourceSha256": "271b6e6ca363cd9ea7ee6b174ec7ef19dfe3347c6a624e013a7744553554fde7",
+  "supersedes": "0xc4a9e0594FaAbE346BcfB963B551a7aE5c38d0cf"
+}

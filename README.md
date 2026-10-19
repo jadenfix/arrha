@@ -1,8 +1,8 @@
 <div align="center">
 
-# Arrha / Aether
+# Arrha
 
-**A Rust-first L1 prototype with WASM smart contracts and BFT finality, plus separate libraries for AI verification and agent settlement.**
+**Multichain payments and scoped escrow for off-chain agents. The Aether L1 remains an optional development backend.**
 
 [![CI](https://github.com/jadenfix/arrha/actions/workflows/ci.yml/badge.svg)](https://github.com/jadenfix/arrha/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -10,16 +10,35 @@
 
 ---
 
-**Local validator devnet** &nbsp;&middot;&nbsp; **BFT finality** &nbsp;&middot;&nbsp; **WASM contracts**
+**EVM escrow** &nbsp;&middot;&nbsp; **Solana escrow** &nbsp;&middot;&nbsp; **Bitcoin / Lightning payments**
 
 </div>
 
 ---
 
-## What works today
+## Settlement product and qualification
+
+The [settlement package](settlement/README.md) operates without an Arrha validator,
+consensus node, bridge or new token. Agents execute work off-chain; signed terms,
+receipt commitments, deadlines and a named arbitrator govern escrow outcomes.
+A signed receipt records a claim, not proof that an AI answer is correct.
+
+| Adapter | Executed evidence and limits |
+| --- | --- |
+| EVM escrow | Local contracts/SDK/service/browser E2E passed. Arbitrum Sepolia v1 journeys finalized; strict-debit v2 is source verified with public requalification in progress. |
+| Solana escrow | Local-validator and public-devnet SDK payout/refund/dispute/recovery journeys passed. Native browser and mainnet remain unqualified; the devnet upgrade authority is published. |
+| Bitcoin / Lightning | Bitcoin Core regtest and two-node LND payment/recovery journeys passed. Payments only; no escrow parity. |
+| Release | Independent security review and an explicitly approved capped real-funds pilot remain open. No mainnet deployment is qualified. |
+
+Start with Node 22.12+ in `settlement/`: `npm ci --workspaces=false`, then
+`npm run build` and `npm test`. See the package README for wallet setup, native
+adapters, versioned deployments and exact E2E scope. Its default suite needs no
+purchased crypto. See [delivery gates](settlement/docs/status.md) before deployment.
+
+## Optional Aether L1 backend
 
 Arrha is the repository name; Rust packages, binaries, RPC methods, and configuration
-still use **Aether**. The runnable product is a local validator network: clients sign
+still use **Aether**. The optional local validator backend lets clients sign
 transactions, validators exchange blocks and votes, the ledger executes transfers and
 WASM contracts, and certified blocks commit finalized state to RocksDB.
 
@@ -35,7 +54,7 @@ See [architecture](docs/architecture.md) for source-level wiring and
 [testing](docs/testing.md) for what each E2E path covers. Deployment manifests and
 network presets do not establish an operating public network or production readiness.
 
-## Recorded local measurements
+## Optional backend measurements
 
 The [benchmark report](docs/benchmarks.md) records a 2026-10-18 run at commit
 `ed0961e`: four validator processes on one Apple M4 laptop over localhost.
@@ -52,7 +71,7 @@ The report includes raw artifacts, method, and limitations. It does not measure 
 latency, a large validator population, Byzantine load, or production usage. Reproduce
 with `./scripts/bench/run-benchmarks.sh`; that script starts and resets local devnets.
 
-## Architecture
+## Optional backend architecture
 
 ```mermaid
 flowchart LR
@@ -71,7 +90,7 @@ flowchart LR
 
 See [Architecture](docs/architecture.md) for the source audit and integration boundaries.
 
-## Key Features
+## Optional backend features
 
 ### Hybrid Consensus
 VRF-based leader election, HotStuff-style BFT voting and BLS aggregate signatures. Blocks outside the genesis/bootstrap exception require a parent quorum certificate (>= 2/3 stake); a block is final when it and its child in the immediately following slot are both certified (2-chain rule; single-validator mode finalizes its own certificate). Blocks execute on in-memory pending state and are written to RocksDB only when final, so competing unfinalized branches do not overwrite finalized state.
@@ -101,15 +120,7 @@ Turbine and Reed-Solomon erasure-coding libraries exist. The running node curren
 ### Observability
 The node starts a Prometheus exporter and provides structured tracing and RPC health/readiness endpoints. Grafana deployment assets are available separately. The gRPC firehose remains an in-process broadcast library. The standalone indexer polls finalized blocks from a configured node RPC, pins the chain identity and latest-block checkpoint in RocksDB, and serves persisted block summaries; it does not index pending execution.
 
-## Independent settlement product
-
-The [EVM settlement package](settlement/README.md) adds signed agent-work
-escrow on existing EVM networks without depending on this L1. Local deployed
-contract, SDK, persistent-service and browser E2E journeys are implemented.
-Public testnet, independent review, mainnet, Solana and Bitcoin remain separate
-open gates; this is not a production launch.
-
-## Quick Start
+## Optional backend quick start
 
 **Prerequisites:** current stable Rust with Cargo, a C/C++ compiler and libclang for RocksDB, Git, Bash, curl, and Python 3. Node.js 20+ and npm are optional for web/TypeScript builds. Workspace package metadata declares Rust 1.86; CI follows stable Rust. See [Getting Started](GETTING_STARTED.md) for setup.
 
@@ -288,12 +299,12 @@ cargo run -p aether-cli --bin aetherctl -- --help
 | [Runbooks](docs/ops/RUNBOOKS.md) | Operational procedures |
 | [Roadmap](IMPLEMENTATION_ROADMAP.md) | Delivery plan and milestones |
 
-## Ecosystem and settlement design
+## L1 ecosystem libraries
 
 Arrha belongs to the [jadenfix/ecosystem](https://github.com/jadenfix/ecosystem)
 family. Its validator node runs independently of sibling repositories.
 
-The proposed ecosystem role is settlement for agent work: signed job requests,
+The optional L1 ecosystem libraries propose settlement for agent work: signed job requests,
 receipts, verifier decisions, challenge handling, and escrow outcomes. The repository
 contains schemas and settlement libraries, with in-process library E2E coverage.
 The running node does not expose an integrated AI job API or execute the entire

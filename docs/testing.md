@@ -25,11 +25,18 @@ ownership. Run `./cli-test --help` for the accepted flags.
 | [Adversarial](../crates/node/tests/e2e_adversarial.rs) | Forged messages and invalid transitions through node/consensus/ledger paths | Selected in-process scenarios. |
 | [Agent settlement](../crates/sdk/rust/tests/agent_settlement_e2e.rs) | Signing, authorization, escrow, receipts, settlement across libraries | Library journey; some validator fixtures accept signatures. No deployed chain/provider claim. |
 | [Process devnet](../scripts/e2e-devnet.sh) | Four validators, DNS and libp2p, CLI/RPC transfers, WASM deployment/calls, finality, crash/rejoin | Real local networking on one machine; defaults `DEVNET_DNS_HOST=localhost` to exercise OS DNS lookup. |
+| [Bootstrap recovery](../scripts/bootstrap-retry-e2e.py) | Start an isolated follower before its only seed, then restart the seed; require reconnection, finality, and an exact transfer balance on the follower | Four real processes in a star topology, dynamically reserved local ports; no reverse dial to the isolated follower. |
 
 Scenario counts change with the retained journeys and are intentionally not
 used as a completion signal. Record a passing execution against an exact
 revision. The process journey checks parent QC signer counts and compares the
 finalized hash on validators 1 and 4 at a common slot after rejoin.
+
+After building the node, genesis ceremony, and CLI binaries, run the isolated
+bootstrap journey with `python3 scripts/bootstrap-retry-e2e.py`. It uses release
+binaries by default; set `AETHER_BIN_DIR` to use another build directory. It
+reserves its own ports, stops only its child processes, and preserves logs on
+failure (or with `KEEP_DEVNET_DATA=1`).
 
 Library unit and doctest harnesses are disabled. Unit/property sources, old phase
 acceptance wrappers, and JS/Python unit-test runners were removed by maintainer

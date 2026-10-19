@@ -12,7 +12,7 @@ use libp2p::{
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -44,6 +44,9 @@ const MAX_ESTABLISHED_INBOUND: u32 = 128;
 const MAX_ESTABLISHED_OUTBOUND: u32 = 128;
 /// Maximum established connections per single peer (prevents resource hogging).
 const MAX_ESTABLISHED_PER_PEER: u32 = 4;
+/// Keep an address-only dial marked in flight long enough for libp2p's
+/// transport and handshake timeouts, preventing retry ticks from duplicating it.
+const ADDRESS_DIAL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Events emitted by the P2P network to the node.
 #[derive(Debug)]
@@ -177,6 +180,12 @@ pub struct P2PNetwork {
     /// Banned peers with expiry timestamps. Peers cannot reconnect until ban expires.
     banned_peers: HashMap<PeerId, u64>,
     rate_limiters: HashMap<PeerId, PeerRateLimiter>,
+    /// Peer-ID-addressed dials in flight; retries must not create parallel dials.
+    dialing_peers: HashSet<PeerId>,
+    /// Address-only bootstrap dials (common in container DNS setups).
+    dialing_addresses: HashMap<String, (Multiaddr, Instant)>,
+    /// Resolved bootstrap target identities, used to skip DNS while connected.
+    bootstrap_target_peers: HashMap<String, PeerId>,
 }
 
 #[derive(Clone, Debug)]
@@ -258,6 +267,9 @@ impl P2PNetwork {
             peers: HashMap::new(),
             banned_peers: HashMap::new(),
             rate_limiters: HashMap::new(),
+            dialing_peers: HashSet::new(),
+            dialing_addresses: HashMap::new(),
+            bootstrap_target_peers: HashMap::new(),
         })
     }
 
@@ -368,24 +380,88 @@ impl P2PNetwork {
     /// the operating system with a bounded lookup before dialing. Refuses to
     /// dial banned peers and explicitly rejects DNSADDR.
     pub async fn connect_peer(&mut self, addr: &str) -> Result<()> {
-        let multiaddr: Multiaddr = addr
+        let original: Multiaddr = addr
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid multiaddr: {}", e))?;
-        let multiaddr = resolve_dns_multiaddr(&multiaddr, addr)
-            .await?
-            .unwrap_or(multiaddr);
-
-        // Extract peer ID from multiaddr and reject if banned
-        if let Some(libp2p::multiaddr::Protocol::P2p(peer_id)) = multiaddr.iter().last() {
+        if let Some(peer_id) = self.bootstrap_target_peers.get(addr).copied() {
             if self.is_banned(&peer_id) {
                 return Err(anyhow::anyhow!(
                     "peer {} is banned, refusing to dial",
                     peer_id
                 ));
             }
+            if self.peers.contains_key(&peer_id) || self.swarm.is_connected(&peer_id) {
+                return Ok(());
+            }
+            self.bootstrap_target_peers.remove(addr);
+        }
+        if let Some(libp2p::multiaddr::Protocol::P2p(peer_id)) = original.iter().last() {
+            if self.is_banned(&peer_id) {
+                return Err(anyhow::anyhow!(
+                    "peer {} is banned, refusing to dial",
+                    peer_id
+                ));
+            }
+            if self.peers.contains_key(&peer_id)
+                || self.swarm.is_connected(&peer_id)
+                || self.dialing_peers.contains(&peer_id)
+            {
+                return Ok(());
+            }
+        }
+        let now = Instant::now();
+        self.dialing_addresses
+            .retain(|_, (_, started)| now.duration_since(*started) < ADDRESS_DIAL_TIMEOUT);
+        if self
+            .dialing_addresses
+            .get(addr)
+            .is_some_and(|(_, started)| now.duration_since(*started) < ADDRESS_DIAL_TIMEOUT)
+        {
+            return Ok(());
         }
 
-        self.swarm.dial(multiaddr)?;
+        let multiaddr = resolve_dns_multiaddr(&original, addr)
+            .await?
+            .unwrap_or(original);
+
+        // Extract peer ID from multiaddr and reject if banned
+        let peer_id = match multiaddr.iter().last() {
+            Some(libp2p::multiaddr::Protocol::P2p(peer_id)) => Some(peer_id),
+            _ => None,
+        };
+        if let Some(peer_id) = peer_id {
+            if self.is_banned(&peer_id) {
+                return Err(anyhow::anyhow!(
+                    "peer {} is banned, refusing to dial",
+                    peer_id
+                ));
+            }
+            if self.peers.contains_key(&peer_id)
+                || self.swarm.is_connected(&peer_id)
+                || self.dialing_peers.contains(&peer_id)
+            {
+                return Ok(());
+            }
+        } else {
+            let transport_addr = without_peer_id(&multiaddr);
+            if self.peers.values().any(|peer| {
+                peer.address
+                    .parse::<Multiaddr>()
+                    .is_ok_and(|address| without_peer_id(&address) == transport_addr)
+            }) {
+                return Ok(());
+            }
+        }
+
+        self.swarm.dial(multiaddr.clone())?;
+        if let Some(peer_id) = peer_id {
+            self.dialing_peers.insert(peer_id);
+        } else {
+            self.dialing_addresses.insert(
+                addr.to_owned(),
+                (without_peer_id(&multiaddr), Instant::now()),
+            );
+        }
         Ok(())
     }
 
@@ -489,7 +565,21 @@ impl P2PNetwork {
 
                     return Some(event);
                 }
-                SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                SwarmEvent::ConnectionEstablished {
+                    peer_id, endpoint, ..
+                } => {
+                    self.dialing_peers.remove(&peer_id);
+                    let remote_addr = endpoint.get_remote_address().clone();
+                    let remote_transport_addr = without_peer_id(&remote_addr);
+                    let matching_dial_addr = self
+                        .dialing_addresses
+                        .iter()
+                        .find(|(_, (address, _))| without_peer_id(address) == remote_transport_addr)
+                        .map(|(key, (address, _))| (key.clone(), address.clone()));
+                    if let Some((key, _)) = &matching_dial_addr {
+                        self.dialing_addresses.remove(key);
+                        self.bootstrap_target_peers.insert(key.clone(), peer_id);
+                    }
                     // Check if peer is banned
                     if let Some(&ban_expiry) = self.banned_peers.get(&peer_id) {
                         if current_timestamp() < ban_expiry {
@@ -502,9 +592,21 @@ impl P2PNetwork {
                         }
                     }
 
+                    if let Some(info) = self.peers.get_mut(&peer_id) {
+                        // A duplicate inbound connection can report the
+                        // remote ephemeral port. Preserve the actual bootstrap
+                        // target learned from an outbound dial when available.
+                        if let Some((_, dial_addr)) = matching_dial_addr {
+                            info.address = dial_addr.to_string();
+                        }
+                        continue;
+                    }
+
                     let info = PeerInfo {
                         id: peer_id.to_string(),
-                        address: String::new(),
+                        address: matching_dial_addr
+                            .map(|(_, dial_addr)| dial_addr.to_string())
+                            .unwrap_or_else(|| remote_addr.to_string()),
                         score: 0,
                         connected_at: current_timestamp(),
                     };
@@ -513,11 +615,27 @@ impl P2PNetwork {
                     NET_METRICS.peers_connected.set(self.peers.len() as i64);
                     return Some(NetworkEvent::PeerConnected(peer_id));
                 }
-                SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                    self.peers.remove(&peer_id);
-                    self.rate_limiters.remove(&peer_id);
-                    NET_METRICS.peers_connected.set(self.peers.len() as i64);
-                    return Some(NetworkEvent::PeerDisconnected(peer_id));
+                SwarmEvent::ConnectionClosed {
+                    peer_id,
+                    num_established,
+                    ..
+                } => {
+                    if num_established == 0 {
+                        self.peers.remove(&peer_id);
+                        self.rate_limiters.remove(&peer_id);
+                        self.bootstrap_target_peers
+                            .retain(|_, target_peer| *target_peer != peer_id);
+                        NET_METRICS.peers_connected.set(self.peers.len() as i64);
+                        return Some(NetworkEvent::PeerDisconnected(peer_id));
+                    }
+                    continue;
+                }
+                SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                    if let Some(peer_id) = peer_id {
+                        self.dialing_peers.remove(&peer_id);
+                    }
+                    tracing::debug!(?peer_id, %error, "outbound peer dial failed");
+                    continue;
                 }
                 SwarmEvent::NewListenAddr { address, .. } => {
                     tracing::info!("Listening on {}/p2p/{}", address, self.local_peer_id);
@@ -607,6 +725,17 @@ fn max_size_for_topic(topic: &str) -> usize {
         TOPIC_SYNC => MAX_SYNC_MSG_SIZE,
         _ => MAX_BLOCK_SIZE,
     }
+}
+
+fn without_peer_id(addr: &Multiaddr) -> Multiaddr {
+    let mut transport_addr = addr.clone();
+    if matches!(
+        transport_addr.iter().last(),
+        Some(libp2p::multiaddr::Protocol::P2p(_))
+    ) {
+        transport_addr.pop();
+    }
+    transport_addr
 }
 
 fn current_timestamp() -> u64 {

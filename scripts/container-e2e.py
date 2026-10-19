@@ -29,18 +29,47 @@ def request(url, method="GET", payload=None, timeout=3):
 def wait_ready():
     deadline = time.monotonic() + 120
     pending = set(RPCS)
+    last_readiness = {}
     while pending and time.monotonic() < deadline:
         for rpc in list(pending):
             try:
-                status, _ = request(f"{rpc}/ready")
-                if status == 200:
-                    pending.remove(rpc)
-            except (OSError, urllib.error.URLError):
-                pass
+                status, body = request(f"{rpc}/ready")
+            except urllib.error.HTTPError as exc:
+                status, body = exc.code, exc.read()
+            except (OSError, urllib.error.URLError) as exc:
+                last_readiness[rpc] = {"error": str(exc)}
+                continue
+            try:
+                details = json.loads(body)
+            except (TypeError, ValueError):
+                details = {"body": body.decode("utf-8", errors="replace")}
+            if not isinstance(details, dict):
+                details = {"body": details}
+            last_readiness[rpc] = {"http_status": status, **details}
+            if status == 200:
+                pending.remove(rpc)
         if pending:
             time.sleep(1)
     if pending:
-        raise RuntimeError(f"validators did not become ready: {', '.join(sorted(pending))}")
+        for index, rpc in enumerate(RPCS, start=1):
+            if rpc not in pending:
+                continue
+            payload = {
+                "jsonrpc": "2.0",
+                "method": "aeth_getNodeInfo",
+                "params": [],
+                "id": index,
+            }
+            try:
+                _, body = request(rpc, method="POST", payload=payload)
+                response = json.loads(body)
+                last_readiness.setdefault(rpc, {})["node_info"] = response.get("result", response)
+            except Exception as exc:  # include RPC reachability in the timeout diagnostic
+                last_readiness.setdefault(rpc, {})["node_info_error"] = str(exc)
+        raise RuntimeError(
+            "validators did not become ready: "
+            f"{json.dumps({rpc: last_readiness.get(rpc, {}) for rpc in sorted(pending)}, sort_keys=True)}"
+        )
 
 
 def run_cli(*args, timeout=90):
@@ -54,24 +83,59 @@ def run_cli(*args, timeout=90):
     return result.stdout
 
 
+def get_node_info(index, rpc):
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "aeth_getNodeInfo",
+        "params": [],
+        "id": index,
+    }
+    _, body = request(rpc, method="POST", payload=payload)
+    response = json.loads(body)
+    if not isinstance(response.get("result"), dict):
+        raise RuntimeError(f"validator {index} returned invalid node info: {response}")
+    return response["result"]
+
+
+def wait_full_mesh():
+    deadline = time.monotonic() + 30
+    pending = set(enumerate(RPCS, start=1))
+    last_node_info = {}
+    while pending and time.monotonic() < deadline:
+        for index, rpc in list(pending):
+            try:
+                info = get_node_info(index, rpc)
+                last_node_info[rpc] = info
+                peers = info.get("peers")
+                if isinstance(peers, int) and peers >= 3:
+                    pending.remove((index, rpc))
+            except (OSError, ValueError, RuntimeError, urllib.error.URLError) as exc:
+                last_node_info[rpc] = {"error": str(exc)}
+        if pending:
+            time.sleep(1)
+    if pending:
+        details = {
+            rpc: last_node_info.get(rpc, {})
+            for _, rpc in sorted(pending)
+        }
+        raise RuntimeError(
+            "validators did not establish the full mesh (3 peers each): "
+            f"{json.dumps(details, sort_keys=True)}"
+        )
+    for index, rpc in enumerate(RPCS, start=1):
+        info = last_node_info[rpc]
+        print(
+            f"validator {index}: finalized={info.get('finalizedSlot')} peers={info['peers']}",
+            flush=True,
+        )
+
+
 def main():
     print("Waiting for all validators to finalize over the Compose network...", flush=True)
     wait_ready()
 
     # Confirm service DNS and P2P connectivity from validator RPC observations.
-    for index, rpc in enumerate(RPCS, start=1):
-        _, body = request(
-            rpc,
-            method="POST",
-            payload={"jsonrpc": "2.0", "method": "aeth_getNodeInfo", "params": [], "id": index},
-        )
-        info = json.loads(body)["result"]
-        if index > 1 and int(info.get("peerCount", 0)) < 1:
-            raise RuntimeError(f"validator {index} has no P2P peers: {info}")
-        print(
-            f"validator {index}: finalized={info.get('finalizedSlot')} peers={info.get('peerCount')}",
-            flush=True,
-        )
+    wait_full_mesh()
 
     with tempfile.TemporaryDirectory(prefix="aether-container-e2e-") as tmp:
         key_path = os.path.join(tmp, "recipient.json")

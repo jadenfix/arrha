@@ -97,8 +97,10 @@ connections, matching genesis/validator membership, and every node's event log.
 
 `docker-compose.test.yml` defines one genesis initializer, four validators on a
 shared network, and a runner that calls the validators' real JSON-RPC endpoints.
-It waits for finality and peer connectivity, submits a signed transfer through
-validator 1, then checks the finalized balance through validator 4.
+It waits for finality and all-to-all peer connectivity, submits a signed
+transfer through validator 1, then checks the finalized balance through
+validator 4. A readiness timeout reports the validators' readiness and node
+info responses to help distinguish startup failures from a disconnected peer.
 `./scripts/docker-test.sh` builds and runs this journey and removes its project
 and named volumes on exit. The CI Docker job runs the same Compose journey.
 

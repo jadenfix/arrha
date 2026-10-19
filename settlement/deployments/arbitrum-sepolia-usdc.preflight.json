@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "chainId": 421614,
+  "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+  "assetName": "Circle testnet USDC - no monetary value",
+  "decimals": 6,
+  "assetCodeHash": "0x9a736af6aac290d9196883e8686fc1d127ff657ca534fe4b88d6d40dc0bc6750",
+  "maxPerRun": "1000000",
+  "maxOutstanding": "10000000",
+  "assetSource": "https://developers.circle.com/stablecoins/usdc-contract-addresses",
+  "qualification": "testnet preflight only; issuer proxy/implementation authority requires independent review"
+}

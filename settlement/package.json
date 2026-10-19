@@ -1,0 +1,31 @@
+{
+  "name": "@arrha/settlement",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "node src/compile.mjs",
+    "test": "node --experimental-sqlite --test --test-concurrency=1 test/*.test.mjs",
+    "serve": "node --experimental-sqlite src/server.mjs",
+    "cli": "node --experimental-sqlite src/cli.mjs",
+    "test:bitcoin": "node --experimental-sqlite --test test/bitcoin.e2e.mjs",
+    "test:lightning": "node --experimental-sqlite --test test/lightning.e2e.mjs",
+    "test:solana": "node --experimental-sqlite --test solana/client/e2e.mjs",
+    "cli:native": "node --experimental-sqlite src/native-cli.mjs",
+    "cli:solana": "node --experimental-sqlite solana/client/cli.mjs"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "5.6.1",
+    "ethers": "6.17.0"
+  },
+  "devDependencies": {
+    "@foundry-rs/anvil": "1.7.1",
+    "solc": "0.8.37"
+  },
+  "overrides": {
+    "tmp": "0.2.7"
+  }
+}

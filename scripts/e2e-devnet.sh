@@ -95,9 +95,16 @@ grep -Eq "parent-QC [34]/4" "$DEVNET_DIR/blocks.txt" || fail "no block with a 3/
 echo "== 6. kill validator 4 (f=1), keep finalizing, restart and catch up"
 "$ROOT/scripts/devnet.sh" kill 4
 BEFORE=$(finalized_slot "$RPC1")
-sleep 15
-AFTER=$(finalized_slot "$RPC1")
-[ "$AFTER" -gt "$BEFORE" ] || fail "no finality progress with 3/4 validators ($BEFORE -> $AFTER)"
+# VRF leader eligibility permits empty slots; finality requires consecutive
+# certified slots. Poll within the same 90s bound used for initial finality,
+# rather than treating a single 15s sample without adjacent QCs as a stall.
+DEADLINE=$((SECONDS + 90))
+while :; do
+  AFTER=$(finalized_slot "$RPC1")
+  [ "$AFTER" -gt "$BEFORE" ] && break
+  [ $SECONDS -lt $DEADLINE ] || fail "no finality progress with 3/4 validators ($BEFORE -> $AFTER)"
+  sleep 0.5
+done
 echo "   with 3/4 validators finalized slot $BEFORE -> $AFTER"
 "$ROOT/scripts/devnet.sh" restart 4 > /dev/null
 DEADLINE=$((SECONDS + 60))

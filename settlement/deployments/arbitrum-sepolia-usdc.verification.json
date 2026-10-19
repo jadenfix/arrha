@@ -1,0 +1,16 @@
+{
+  "provider": "Sourcify v2",
+  "contract": {
+    "match": "exact_match",
+    "creationMatch": "exact_match",
+    "runtimeMatch": "exact_match",
+    "chainId": "421614",
+    "address": "0xF18e16406B871d67CFAFd30f9630c294474Eb566",
+    "verifiedAt": "2026-10-19T08:09:15Z",
+    "matchId": "56534041"
+  },
+  "verificationId": "b95c80c4-0c3c-4d06-91aa-026b5bba3d75",
+  "url": "https://repo.sourcify.dev/421614/0xF18e16406B871d67CFAFd30f9630c294474Eb566",
+  "securityReview": false,
+  "explorerMirroring": "Not relied on; Sourcify result is authoritative source-match evidence"
+}

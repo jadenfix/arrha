@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": "1",
+  "chainId": 421614,
+  "escrow": "0xc4a9e0594FaAbE346BcfB963B551a7aE5c38d0cf",
+  "asset": "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
+  "assetCodeHash": "0x9a736af6aac290d9196883e8686fc1d127ff657ca534fe4b88d6d40dc0bc6750",
+  "decimals": 6,
+  "assetName": "Circle testnet USDC - no monetary value",
+  "deploymentBlock": 320657237,
+  "deploymentTransaction": "0xd1f49fbad66bb8975040d0bef082e67c43f5474797f264cb4cbad01150e99e75",
+  "runtimeHash": "0x2ca6635e4c48bc0108c866a98369a0c6064eae9694a8cf1372e934dbd639f081",
+  "finality": "finalized",
+  "maxBackfillBlocks": 100000,
+  "explorer": "https://sepolia.arbiscan.io",
+  "qualification": "Source exact-match verified; public SDK payout/refund/dispute and restart journeys finalized; independent review pending; no real funds",
+  "maxPerRun": "1000000",
+  "maxOutstanding": "10000000",
+  "deploymentVersion": 1,
+  "sourceRevision": "565c5eb2edb36132cdcbccdf26131d66d4a81d12",
+  "escrowSourceSha256": "7455e5191d1f7970045fcbe9e9ccd71379daed045bf54d1e19654b61210140a3"
+}

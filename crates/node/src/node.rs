@@ -54,6 +54,9 @@ const SYNC_RESPONSE_COOLDOWN: Duration = Duration::from_secs(1);
 /// Minimum interval between our own catch-up (block range) requests.
 const CATCHUP_REQUEST_INTERVAL: Duration = Duration::from_millis(1000);
 
+/// Slot span per sync page, including empty slots during an outage.
+const SYNC_PAGE_SLOTS: u64 = 64;
+
 /// Maximum transactions per gossip batch (keeps a batch well under the 1 MB
 /// tx-topic limit).
 const MAX_TX_GOSSIP_BATCH: usize = 1500;
@@ -246,6 +249,8 @@ pub struct Node {
     /// Transactions accepted locally and not yet gossiped.
     tx_gossip_buf: Vec<Transaction>,
     last_catchup_request: Option<Instant>,
+    /// Next page in a repeating sweep from our certified head to wall-clock slot.
+    catchup_next_slot: Slot,
     block_times: HashMap<H256, BlockTimes>,
     /// Blocks whose QC we already logged.
     qc_logged: HashSet<H256>,
@@ -489,6 +494,7 @@ impl Node {
             vote_floor: None,
             tx_gossip_buf: Vec::new(),
             last_catchup_request: None,
+            catchup_next_slot: 0,
             block_times: HashMap::new(),
             qc_logged: HashSet::new(),
             event_log: None,
@@ -904,16 +910,27 @@ impl Node {
             .max(self.finalized_tip_slot)
             .saturating_add(1);
         let to = current_slot.max(from);
+        // A disconnected committee can leave an entire page without blocks.
+        // Always requesting the first page would then prevent us from ever
+        // reaching newer certified blocks. Sweep bounded pages and wrap so a
+        // dropped request/response is retried without skipping history forever.
+        let page_from = self.catchup_next_slot.clamp(from, to);
+        let page_to = page_from.saturating_add(SYNC_PAGE_SLOTS - 1).min(to);
+        self.catchup_next_slot = if page_to == to {
+            from
+        } else {
+            page_to.saturating_add(1)
+        };
         tracing::info!(
-            from,
-            to,
+            from = page_from,
+            to = page_to,
             orphans = self.orphan_count,
             "Requesting missing blocks from peers"
         );
         self.last_catchup_request = Some(Instant::now());
         self.broadcast(OutboundMessage::RequestBlockRange {
-            from_slot: from,
-            to_slot: to,
+            from_slot: page_from,
+            to_slot: page_to,
         });
     }
 
@@ -2185,8 +2202,7 @@ impl Node {
             }
         }
 
-        const MAX_BLOCKS_PER_RESPONSE: u64 = 64;
-        let end = to_slot.min(from_slot.saturating_add(MAX_BLOCKS_PER_RESPONSE));
+        let end = to_slot.min(from_slot.saturating_add(SYNC_PAGE_SLOTS - 1));
 
         let mut sent = 0u64;
         for slot in from_slot..=end {

@@ -1,0 +1,29 @@
+name: Independent settlement E2E
+on:
+  pull_request:
+    paths: ['settlement/**', '.github/workflows/settlement.yml']
+  push:
+    branches: [main]
+    paths: ['settlement/**', '.github/workflows/settlement.yml']
+permissions:
+  contents: read
+jobs:
+  evm-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: settlement
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: settlement/package-lock.json
+      - run: npm ci --workspaces=false
+      - run: npx --yes agent-browser@0.39.1 install --with-deps
+      - run: npm run build
+      - run: npm audit
+      - run: npm test
+      - run: npm ci --workspaces=false --prefix solana/client && npm audit --prefix solana/client

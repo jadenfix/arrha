@@ -1,0 +1,6 @@
+node_modules/
+artifacts/
+*.sqlite*
+.local/
+.local-test-*/
+solana/target/

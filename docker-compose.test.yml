@@ -53,7 +53,7 @@ services:
       VALIDATOR_ID: "1"
       AETHER_VALIDATOR_KEY: /app/data/genesis/validator-1.key
       AETHER_NODE_DB_PATH: /app/data/validator-1
-      AETHER_BOOTSTRAP_PEERS: ""
+      AETHER_BOOTSTRAP_PEERS: /dns4/validator-2/tcp/9000,/dns4/validator-3/tcp/9000,/dns4/validator-4/tcp/9000
     ports:
       - "8545:8545"
       - "9000:9000"
@@ -68,7 +68,7 @@ services:
       VALIDATOR_ID: "2"
       AETHER_VALIDATOR_KEY: /app/data/genesis/validator-2.key
       AETHER_NODE_DB_PATH: /app/data/validator-2
-      AETHER_BOOTSTRAP_PEERS: /dns4/validator-1/tcp/9000
+      AETHER_BOOTSTRAP_PEERS: /dns4/validator-1/tcp/9000,/dns4/validator-3/tcp/9000,/dns4/validator-4/tcp/9000
     ports:
       - "8546:8545"
       - "9001:9000"
@@ -83,7 +83,7 @@ services:
       VALIDATOR_ID: "3"
       AETHER_VALIDATOR_KEY: /app/data/genesis/validator-3.key
       AETHER_NODE_DB_PATH: /app/data/validator-3
-      AETHER_BOOTSTRAP_PEERS: /dns4/validator-1/tcp/9000
+      AETHER_BOOTSTRAP_PEERS: /dns4/validator-1/tcp/9000,/dns4/validator-2/tcp/9000,/dns4/validator-4/tcp/9000
     ports:
       - "8547:8545"
       - "9002:9000"
@@ -98,7 +98,7 @@ services:
       VALIDATOR_ID: "4"
       AETHER_VALIDATOR_KEY: /app/data/genesis/validator-4.key
       AETHER_NODE_DB_PATH: /app/data/validator-4
-      AETHER_BOOTSTRAP_PEERS: /dns4/validator-1/tcp/9000
+      AETHER_BOOTSTRAP_PEERS: /dns4/validator-1/tcp/9000,/dns4/validator-2/tcp/9000,/dns4/validator-3/tcp/9000
     ports:
       - "8548:8545"
       - "9003:9000"

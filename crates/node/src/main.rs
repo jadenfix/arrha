@@ -346,6 +346,8 @@ impl RpcBackend for NodeRpcBackend {
 /// initial sync or a message flood from peers). Remaining events are
 /// processed on the next tick.
 const MAX_EVENTS_PER_TICK: usize = 256;
+const MAX_BOOTSTRAP_PEERS: usize = 32;
+const BOOTSTRAP_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 async fn run_slot_loop(
     node: Arc<RwLock<Node>>,
@@ -427,9 +429,13 @@ async fn run_p2p_outbound(
     mut p2p: P2PNetwork,
     mut outbound_rx: mpsc::Receiver<OutboundMessage>,
     net_tx: mpsc::Sender<aether_p2p::network::NetworkEvent>,
+    bootstrap_peers: Vec<String>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut inbound_event_drops: u64 = 0;
+    let mut bootstrap_retry = tokio::time::interval(BOOTSTRAP_RETRY_INTERVAL);
+    bootstrap_retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut next_bootstrap = 0usize;
 
     loop {
         tokio::select! {
@@ -437,6 +443,15 @@ async fn run_p2p_outbound(
             _ = shutdown_rx.changed() => {
                 tracing::info!("P2P outbound loop received shutdown signal, stopping");
                 return Ok(());
+            }
+            // Retry bootstrap addresses at a bounded rate. P2PNetwork suppresses
+            // duplicate connected and in-flight dials and enforces peer bans.
+            _ = bootstrap_retry.tick(), if !bootstrap_peers.is_empty() => {
+                let addr = &bootstrap_peers[next_bootstrap];
+                next_bootstrap = (next_bootstrap + 1) % bootstrap_peers.len();
+                if let Err(e) = p2p.connect_peer(addr).await {
+                    tracing::debug!(peer = %addr, error = %e, "bootstrap dial will be retried");
+                }
             }
             // Poll for inbound P2P events
             event = p2p.poll() => {
@@ -773,17 +788,21 @@ async fn main() -> Result<()> {
     );
     tracing::info!("Press Ctrl-C to stop.\n");
 
-    // Connect to bootstrap peers if specified
-    if let Ok(peers) = env::var("AETHER_BOOTSTRAP_PEERS") {
-        for peer_addr in peers.split(',') {
-            let addr = peer_addr.trim();
-            if !addr.is_empty() {
-                match p2p.connect_peer(addr).await {
-                    Ok(()) => tracing::info!("Connecting to peer: {addr}"),
-                    Err(e) => tracing::warn!("Failed to connect to {addr}: {e}"),
-                }
-            }
-        }
+    // Keep bootstrap targets in the P2P loop: a seed may not be listening
+    // when this validator starts, so failed startup dials must be retried.
+    let bootstrap_peers = env::var("AETHER_BOOTSTRAP_PEERS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|addr| !addr.is_empty())
+        .take(MAX_BOOTSTRAP_PEERS)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if bootstrap_peers.len() == MAX_BOOTSTRAP_PEERS {
+        tracing::warn!(
+            max = MAX_BOOTSTRAP_PEERS,
+            "bootstrap peer list reached its configured limit"
+        );
     }
 
     let slot_task = tokio::spawn(run_slot_loop(
@@ -797,7 +816,13 @@ async fn main() -> Result<()> {
     let rpc_task = rpc_server.run();
     tokio::pin!(rpc_task);
     let mut rpc_finished = false;
-    let p2p_task = tokio::spawn(run_p2p_outbound(p2p, outbound_rx, net_tx, shutdown_rx));
+    let p2p_task = tokio::spawn(run_p2p_outbound(
+        p2p,
+        outbound_rx,
+        net_tx,
+        bootstrap_peers,
+        shutdown_rx,
+    ));
     let metrics_addr: std::net::SocketAddr = ([0, 0, 0, 0], metrics_port).into();
     let metrics_task = tokio::spawn(async move {
         if let Err(e) = start_metrics_exporter(metrics_addr).await {

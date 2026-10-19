@@ -93,6 +93,10 @@ flowchart LR
   listens on TCP port 9000; metrics default to port 9090.
 - The four-process devnet overrides these to RPC 8545–8548, P2P 9000–9003,
   and metrics 9100–9103; see [`scripts/devnet.sh`](../scripts/devnet.sh).
+- The P2P loop retries up to 32 configured bootstrap targets in rotation,
+  attempting one target every five seconds. Connected and in-flight dials are
+  suppressed, bans still apply, and one bounded OS DNS lookup can occur per
+  tick. A late or restarted seed can reconnect without restarting its followers.
 - CLI, Rust/TypeScript/Python SDKs, explorer, and wallet connect directly to
   node JSON-RPC. The optional four-process devnet client journey exercises
   signed transfers through the TypeScript and Python SDKs across validators;
@@ -123,8 +127,8 @@ settlement require integration beyond those maps.
   validators with a common genesis and real libp2p connections.
 - **Compose assets:** `docker-compose.test.yml` and
   `deploy/docker/docker-compose.yml` use one shared-genesis four-validator
-  container journey and a real RPC transfer runner. They do not run the
-  standalone indexer or establish an operator deployment.
+  full-mesh container journey and a real RPC transfer runner. They do not run
+  the standalone indexer or establish an operator deployment.
 - **Infrastructure scaffolding:** `deploy/helm`, `deploy/k8s`, and
   `deploy/terraform` are deployment assets, not evidence of a deployed network.
 
